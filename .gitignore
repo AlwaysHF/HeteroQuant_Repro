@@ -1,0 +1,19 @@
+# Python/cache artifacts
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.cache/
+
+# Runtime outputs and datasets
+cache/
+experiments/
+*.log
+
+# Local model weights and machine-specific files
+local_models/
+.env
+.vscode/
+
+# Large runtime artifact. Keep outside normal Git; see README.
+Rot.pkl
