@@ -33,138 +33,43 @@ def _clone_linear(module: nn.Linear) -> nn.Linear:
     return cloned
 
 
-def _valid_group_size(value):
-    if value is None:
-        return None
-    value = int(value)
-    if value <= 0:
-        return None
-    return value
-
-
-def _fake_quant_weight_for_outlier_score(weight: torch.Tensor, n_bits: int, symmetric: bool, group_size=None) -> torch.Tensor:
-    if n_bits >= 16:
-        return weight.detach().float()
-
-    x = weight.detach().float()
-    original_shape = tuple(x.shape)
-    group_size = _valid_group_size(group_size)
-    padded_shape = None
-    pad = 0
-    if group_size is not None:
-        last_dim = x.shape[-1]
-        deficiency = last_dim % group_size
-        pad = 0 if deficiency == 0 else group_size - deficiency
-        if pad > 0:
-            x = F.pad(x, (0, pad))
-        padded_shape = tuple(x.shape)
-        x = x.reshape(-1, group_size)
-    else:
-        x = x.reshape(-1, x.shape[-1])
-
-    if symmetric:
-        qmin = -(2 ** (n_bits - 1))
-        qmax = 2 ** (n_bits - 1) - 1
-        scale = x.abs().amax(dim=-1, keepdim=True).clamp(min=1e-5) / max(qmax, 1)
-        x_int = torch.round(x / scale).clamp(qmin, qmax)
-        x_dequant = x_int * scale
-    else:
-        qmin = 0
-        qmax = 2 ** n_bits - 1
-        xmin = x.amin(dim=-1, keepdim=True)
-        xmax = x.amax(dim=-1, keepdim=True)
-        scale = (xmax - xmin).clamp(min=1e-5) / max(qmax - qmin, 1)
-        zero = torch.round(qmin - xmin / scale).clamp(qmin, qmax)
-        x_int = (torch.round(x / scale) + zero).clamp(qmin, qmax)
-        x_dequant = (x_int - zero) * scale
-
-    if padded_shape is not None:
-        x_dequant = x_dequant.reshape(padded_shape)
-        if pad > 0:
-            x_dequant = x_dequant.narrow(-1, 0, original_shape[-1])
-    else:
-        x_dequant = x_dequant.reshape(original_shape)
-    return x_dequant
-
-
-def _weight_quant_error_by_input_channel(module: nn.Linear, args) -> torch.Tensor:
-    n_bits = int(getattr(args, "wbits", 16))
-    symmetric = bool(getattr(args, "symmetric", False))
-    group_size = getattr(args, "group_size", None)
-    weight = module.weight.detach().float().cpu()
-    quant_weight = _fake_quant_weight_for_outlier_score(weight, n_bits, symmetric, group_size)
-    return (weight - quant_weight).pow(2).sum(dim=0)
-
-
-def _get_outlier_act_energy(args, layer_idx, expert_idx, in_features):
-    stats = getattr(args, "moe_outlier_act_energy", None) or {}
-    if layer_idx is None:
-        return None
-    keys = [
-        f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.up_proj",
-        f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.gate_proj",
-        f"model.layers.{layer_idx}.mlp.gate",
-    ]
-    for key in keys:
-        if key not in stats:
-            continue
-        energy = stats[key].detach().float().cpu().flatten()
-        if energy.numel() != in_features:
-            continue
-        energy = torch.nan_to_num(energy, nan=0.0, posinf=0.0, neginf=0.0).clamp(min=0)
-        mean = energy.mean().clamp(min=1e-12)
-        return energy / mean
-    return None
-
-
-def _get_shared_layer_outlier_scores(args, layer_idx, in_features):
-    if args is None or getattr(args, "moe_outlier_shared_layer_score", "none") != "smooth_scale":
-        return None
-    if layer_idx is None:
-        return None
-    scores_by_layer = getattr(args, "moe_outlier_shared_layer_scores", None) or {}
-    if layer_idx not in scores_by_layer:
-        raise KeyError(f"missing shared smooth_scale outlier scores for MoE layer {layer_idx}")
-    scores = scores_by_layer[layer_idx].detach().float().cpu().flatten()
-    if scores.numel() != in_features:
-        raise ValueError(
-            f"shared smooth_scale outlier scores for MoE layer {layer_idx} have "
-            f"{scores.numel()} channels, expected {in_features}"
-        )
-    return torch.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0).clamp(min=0)
-
-
-def _topk_outlier_input_channels(module: nn.Linear, topk: int, args=None, layer_idx=None, expert_idx=None) -> torch.Tensor:
+def _topk_outlier_input_channels(
+    module: nn.Linear,
+    topk: int,
+    args=None,
+    module_name=None,
+) -> torch.Tensor:
     topk = min(int(topk), module.in_features)
     if topk <= 0:
         return torch.empty(0, dtype=torch.long)
 
-    shared_scores = _get_shared_layer_outlier_scores(args, layer_idx, module.in_features)
-    if shared_scores is not None:
-        return torch.topk(shared_scores, k=topk, largest=True, sorted=True).indices.to(torch.long)
+    if module_name is None:
+        raise ValueError("module_name is required for module-level moe_outlier_scores")
 
-    score_method = getattr(args, "moe_outlier_score", "weight_max") if args is not None else "weight_max"
-    weight_max_scores = module.weight.detach().abs().amax(dim=0).float().cpu()
-    if score_method == "weight_max":
-        scores = weight_max_scores
-    elif score_method in ("weight_error", "act_weight_error"):
-        scores = _weight_quant_error_by_input_channel(module, args)
-        if score_method == "act_weight_error":
-            act_energy = _get_outlier_act_energy(args, layer_idx, expert_idx, module.in_features)
-            if act_energy is not None:
-                scores = scores * act_energy
-    else:
-        raise ValueError(f"unsupported moe_outlier_score: {score_method}")
+    scores_by_module = getattr(args, "moe_outlier_scores", None) or {}
+    if module_name not in scores_by_module:
+        raise KeyError(f"missing moe_outlier_scores for {module_name}")
 
-    scores = torch.nan_to_num(scores.float().cpu(), nan=0.0, posinf=0.0, neginf=0.0)
+    scores = scores_by_module[module_name].detach().float().cpu().flatten()
+    if scores.numel() != module.in_features:
+        raise ValueError(
+            f"moe_outlier_scores for {module_name} have {scores.numel()} channels, "
+            f"expected {module.in_features}"
+        )
+
+    scores = torch.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0).clamp(min=0)
     if scores.numel() == 0 or scores.max().item() <= 0:
-        scores = weight_max_scores
+        raise ValueError(f"invalid all-zero moe_outlier_scores for {module_name}")
+
     return torch.topk(scores, k=topk, largest=True, sorted=True).indices.to(torch.long)
 
 
-def _split_linear_outlier_columns(module: nn.Linear, topk: int, args=None, layer_idx=None, expert_idx=None):
+def _split_linear_outlier_columns(module: nn.Linear, topk: int, args=None, module_name=None):
     outlier_idx = _topk_outlier_input_channels(
-        module, topk, args=args, layer_idx=layer_idx, expert_idx=expert_idx
+        module,
+        topk,
+        args=args,
+        module_name=module_name,
     )
     if outlier_idx.numel() == 0:
         return module, None, outlier_idx
@@ -563,24 +468,32 @@ class QuantOlmoeSparseMoeBlock(nn.Module):
         up_outlier_indices = []
         for expert_idx in range(self.num_experts):
             org_expert = org_module.experts[expert_idx]
-            gate_proj = org_expert.gate_proj
-            up_proj = org_expert.up_proj
-            if outlier_topk > 0:
-                gate_proj, gate_outlier_proj, gate_outlier_idx = _split_linear_outlier_columns(
-                    org_expert.gate_proj, outlier_topk, args=args, layer_idx=layer_idx, expert_idx=expert_idx
-                )
-                up_proj, up_outlier_proj, up_outlier_idx = _split_linear_outlier_columns(
-                    org_expert.up_proj, outlier_topk, args=args, layer_idx=layer_idx, expert_idx=expert_idx
-                )
-                gate_outlier_modules.append(gate_outlier_proj)
-                up_outlier_modules.append(up_outlier_proj)
-                gate_outlier_indices.append(gate_outlier_idx)
-                up_outlier_indices.append(up_outlier_idx)
             expert_module_name = (
                 f"model.layers.{layer_idx}.mlp.experts.{expert_idx}"
                 if layer_idx is not None
                 else f"experts.{expert_idx}"
             )
+            gate_module_name = f"{expert_module_name}.gate_proj"
+            up_module_name = f"{expert_module_name}.up_proj"
+            gate_proj = org_expert.gate_proj
+            up_proj = org_expert.up_proj
+            if outlier_topk > 0:
+                gate_proj, gate_outlier_proj, gate_outlier_idx = _split_linear_outlier_columns(
+                    org_expert.gate_proj,
+                    outlier_topk,
+                    args=args,
+                    module_name=gate_module_name,
+                )
+                up_proj, up_outlier_proj, up_outlier_idx = _split_linear_outlier_columns(
+                    org_expert.up_proj,
+                    outlier_topk,
+                    args=args,
+                    module_name=up_module_name,
+                )
+                gate_outlier_modules.append(gate_outlier_proj)
+                up_outlier_modules.append(up_outlier_proj)
+                gate_outlier_indices.append(gate_outlier_idx)
+                up_outlier_indices.append(up_outlier_idx)
             experts.append(
                 QuantOlmoeMLP(
                     org_module=org_expert,

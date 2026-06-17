@@ -73,7 +73,7 @@ def duquant(
     model.config.use_cache = False
     is_llama = False
     expert_num = int(getattr(model.config, "num_experts", 64))
-    if "olmoe" in args.net.lower():
+    if "olmoe" in args.model_name.lower():
         is_llama = True
         is_MOE = True
         args.sp_model_name = "olmoe"
@@ -82,7 +82,7 @@ def duquant(
         model.model.norm = model.model.norm.to(dev)
         DecoderLayer = QuantOlmoeDecoderLayer
         layer_name_prefix = "model.layers"
-    elif "qwen" in args.net.lower():
+    elif "qwen" in args.model_name.lower():
         is_llama = True
         is_MOE = True
         args.sp_model_name = "qwen2_moe"
@@ -134,7 +134,7 @@ def duquant(
     # move embedding layer and first layer to cpu
     layers[0] = layers[0].module
     layers[0] = layers[0].cpu()
-    if "olmoe" in args.net.lower() or "qwen" in args.net.lower():
+    if "olmoe" in args.model_name.lower() or "qwen" in args.model_name.lower():
         model.model.embed_tokens = model.model.embed_tokens.cpu()
         model.model.norm = model.model.norm.cpu()
     else:
@@ -165,7 +165,7 @@ def duquant(
 
         logger.info(f"=== Start quantize layer {i} ===")
         layer = layers[i]
-        if "moe" in args.net.lower():
+        if "moe" in args.model_name.lower():
             qlayer = DecoderLayer(lm.model.config, i, layer, args)
         else:
             qlayer = DecoderLayer(lm.model.config, layer, args)
@@ -302,7 +302,7 @@ def duquant(
                                 need_recalibration = gate_act_quantizer.scales is None
                             if need_recalibration: # not calibrated yet
                                 logger.info(f"recalibration qlayer.mlp.experts[{k}] with input_feat ...")
-                                if "olmoe" in args.net.lower() or "qwen" in args.net.lower():
+                                if "olmoe" in args.model_name.lower() or "qwen" in args.model_name.lower():
                                     if hasattr(qlayer.mlp, "forward_expert"):
                                         qlayer.mlp.forward_expert(k, input_feat["mlp.gate"][:args.seq_length].to(dev))
                                     else:

@@ -22,26 +22,28 @@ class LMClass(BaseLM):
 
         self.args = args
         self._device = torch.device(used_device)
-        self.model_name = args.model
+        self.model_path = args.model
         self.batch_size_per_gpu = args.batch_size
 
         self.model_config = args.model
         used_torch_dtype = torch.float16
 
         self.tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+        if not hasattr(args, "model_name") or args.model_name is None:
+            args.model_name = args.model.split("/")[-1]
         
-        if "olmoe" in args.net.lower():
-            args.net = "olmoe"
+        if "olmoe" in args.model_name.lower():
+            args.model_name = "olmoe"
             args.expert_ratio = 8/64.0
             from models.olmoe.modeling_olmoe import OlmoeForCausalLM
             self.model = OlmoeForCausalLM.from_pretrained(args.model, attn_implementation=args.attn_implementation, device_map='cpu',torch_dtype=used_torch_dtype, trust_remote_code=True)
-        elif "qwen" in args.net.lower():
-            args.net = "qwen2_moe"
+        elif "qwen" in args.model_name.lower():
+            args.model_name = "qwen2_moe"
             from transformers import Qwen2MoeForCausalLM
             self.model = Qwen2MoeForCausalLM.from_pretrained(args.model, attn_implementation=args.attn_implementation, device_map='cpu',torch_dtype=used_torch_dtype, trust_remote_code=True)
             args.expert_ratio = self.model.config.num_experts_per_tok / self.model.config.num_experts
-        elif "pangumoe" in args.net.lower():
-            args.net = "pangumoe"
+        elif "pangumoe" in args.model_name.lower():
+            args.model_name = "pangumoe"
             args.expert_ratio = 8/64.0
             args.block_size = 64 # 1344/64=21
             from models.pangu_moe.modeling_pangu_moe import PanguProMoEForCausalLM

@@ -73,6 +73,7 @@ class UniformAffineQuantizer(nn.Module):
         max_rotation_step=1024,
         permutation_times=1,
         router_top_k=None,
+        scale_search_steps=100,
         model_name="UniformAffineQuantizer",
     ):
         """
@@ -109,6 +110,7 @@ class UniformAffineQuantizer(nn.Module):
         self.quant_method = quant_method
         self.model_name = model_name
         self.router_top_k = router_top_k
+        self.scale_search_steps = int(scale_search_steps)
         self.do_calibration=True
 
         self.enable = True
@@ -453,14 +455,17 @@ class UniformAffineQuantizer(nn.Module):
         xmin_ori = x.amin(reduce_shape, keepdim=True).to(x.device)
         xmax_ori =  x.amax(reduce_shape, keepdim=True).to(x.device)
 
-        loop_times = 100
+        loop_times = int(self.scale_search_steps)
         bottom_bound = 0.35
         ratio_list = torch.ones_like(xmax_ori)
         scale_list = torch.ones_like(xmax_ori)
         best_score_list = torch.ones_like(xmax_ori) * 100000
+        if loop_times <= 0:
+            search_ratios = [1.0]
+        else:
+            search_ratios = [bottom_bound + i * (1 - bottom_bound) / loop_times for i in range(loop_times + 1)]
         
-        for i in range(loop_times + 1):
-            temp_ratio = (bottom_bound + i * (1 - bottom_bound) / loop_times)
+        for temp_ratio in search_ratios:
             xmax = temp_ratio*xmax_ori
             xmin = temp_ratio*xmin_ori
 

@@ -22,12 +22,13 @@ from tqdm import tqdm
 
 from datautils import get_loaders
 from models.LMClass import LMClass
-from quantize.smooth import smooth_lm
+from quantize.smooth import build_moe_fc1_smooth_scales, smooth_lm
 from utils import (
     get_act_per_channel_scales,
     get_act_samples,
     get_act_scales,
     get_moe_act_means,
+    get_moe_act_p99s,
     get_router_logits,
     get_weight_scores,
 )
@@ -457,7 +458,7 @@ def cleanup_memory():
 def build_lm(args):
     lm_args = argparse.Namespace(
         model=args.model,
-        net="olmoe",
+        model_name="olmoe",
         batch_size=1,
         attn_implementation=args.attn_implementation,
     )
@@ -477,31 +478,29 @@ def apply_optional_smooth(lm, args, dataloader):
         f"act_mean_beta={args.act_mean_beta}"
     )
     model = lm.model
-    if args.fc1_scale_merge == "act_mean":
-        moe_act_means = get_moe_act_means(model, dataloader, args.nsamples)
-        act_samples = {}
-        weight_scores = {}
-        router_logits = {}
-    else:
-        moe_act_means = None
-        act_samples = get_act_samples(model, dataloader, args.nsamples)
-        weight_scores = get_weight_scores(model)
-        router_logits = get_router_logits(model, dataloader, args.nsamples)
+    if args.fc1_scale_merge not in ("act_mean", "act_p99"):
+        raise ValueError("--fc1_scale_merge must be act_mean or act_p99")
+    moe_stat_fn = get_moe_act_means if args.fc1_scale_merge == "act_mean" else get_moe_act_p99s
+    moe_act_stats = moe_stat_fn(model, dataloader, args.nsamples)
+    moe_fc1_smooth_scales = build_moe_fc1_smooth_scales(
+        moe_act_stats,
+        act_mean_beta=args.act_mean_beta,
+        model=model,
+    )
     act_scales = get_act_scales(model, dataloader, args.nsamples)
     act_per_channel_scales = get_act_per_channel_scales(model, dataloader, args.nsamples)
     smooth_lm(
         model,
         act_scales,
         act_per_channel_scales,
-        act_samples,
-        weight_scores,
-        router_logits,
+        {},
+        {},
+        {},
         fc1_scale_merge=args.fc1_scale_merge,
         alpha=args.alpha,
         otsu_ratio=args.otsu_ratio,
         otsu_smooth_rate=args.otsu_smooth_rate,
-        moe_act_means=moe_act_means,
-        act_mean_beta=args.act_mean_beta,
+        moe_fc1_smooth_scales=moe_fc1_smooth_scales,
         logger=PrintLogger(),
     )
     cleanup_memory()

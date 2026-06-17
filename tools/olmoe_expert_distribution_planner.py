@@ -23,7 +23,8 @@ from tqdm import tqdm
 
 from datautils import get_loaders
 from models.LMClass import LMClass
-from quantize.smooth import smooth_lm
+from quantize.smooth import build_moe_fc1_smooth_scales, smooth_lm
+from quantize.moe_outlier_score import prepare_moe_outlier_scores
 from utils import (
     get_act_per_channel_scales,
     get_act_samples,
@@ -49,7 +50,7 @@ class PrintLogger:
             return True
         text = str(message)
         noisy_prefixes = ("[smooth_lm]", "scale=")
-        noisy_exact = {"smooth qkv", "calcu_outlier_mask", "get_scale", "get_act_mean_scale"}
+        noisy_exact = {"smooth qkv", "calcu_outlier_mask", "get_scale", "build_moe_fc1_smooth_scales"}
         return not (text.startswith(noisy_prefixes) or text in noisy_exact)
 
     def info(self, message):
@@ -72,8 +73,7 @@ def smooth_stats_cache_path(args, stat_name):
         [
             "smooth_stats_v2",
             str(args.model),
-            str(args.net),
-            str(args.model_family),
+            str(args.model_name),
             str(args.calib_dataset),
             str(args.nsamples),
             str(args.seq_length),
@@ -84,7 +84,7 @@ def smooth_stats_cache_path(args, stat_name):
     digest = hashlib.md5(key.encode("utf-8")).hexdigest()[:16]
     model_tag = safe_cache_tag(Path(args.model).name)
     filename = (
-        f"smooth_stats_v2_{stat_name}_{model_tag}_{args.model_family}_"
+        f"smooth_stats_v2_{stat_name}_{model_tag}_{args.model_name}_"
         f"{args.calib_dataset}_{args.nsamples}_{args.seq_length}_{args.seed}_{digest}.pt"
     )
     return os.path.join(args.cache_dir, filename)
@@ -107,30 +107,6 @@ def load_or_compute_smooth_stat(args, logger, stat_name, compute_fn):
         os.replace(tmp_path, cache_path)
         logger.info(f"save {stat_name} to {cache_path}")
     return value
-
-
-def _layer_index_from_moe_gate_key(key):
-    if ".mlp.gate" not in key:
-        return None
-    try:
-        return int(str(key).split(".layers.", 1)[1].split(".", 1)[0])
-    except (IndexError, ValueError):
-        return None
-
-
-def prepare_shared_layer_outlier_scores(args, logger, moe_stats):
-    if getattr(args, "moe_outlier_shared_layer_score", "none") != "smooth_scale":
-        return
-    scores_by_layer = {}
-    for key, value in (moe_stats or {}).items():
-        layer_idx = _layer_index_from_moe_gate_key(key)
-        if layer_idx is None:
-            continue
-        scores_by_layer[layer_idx] = value.detach().float().cpu().flatten()
-    if not scores_by_layer:
-        raise ValueError("--moe_outlier_shared_layer_score smooth_scale found no .mlp.gate smooth scores")
-    args.moe_outlier_shared_layer_scores = scores_by_layer
-    logger.info(f"prepared shared smooth_scale outlier scores for {len(scores_by_layer)} MoE layers")
 
 
 def save_json(obj, path):
@@ -254,7 +230,7 @@ class DistributionStats:
 def build_lm(args):
     lm_args = argparse.Namespace(
         model=args.model,
-        net=args.net,
+        model_name=args.model_name,
         batch_size=1,
         attn_implementation=args.attn_implementation,
     )
@@ -267,7 +243,7 @@ def build_lm(args):
 
 
 def load_calibration(args):
-    cache_path = Path(args.cache_dir) / f"planner_dataloader_{args.model_family}_{args.calib_dataset}_{args.nsamples}_{args.seq_length}_{args.seed}.cache"
+    cache_path = Path(args.cache_dir) / f"planner_dataloader_{args.model_name}_{args.calib_dataset}_{args.nsamples}_{args.seq_length}_{args.seed}.cache"
     if args.reuse_dataloader_cache and cache_path.exists():
         return torch.load(cache_path, map_location="cpu")[: args.nsamples]
     dataloader, _ = get_loaders(
@@ -292,39 +268,22 @@ def apply_optional_smooth(lm, args, dataloader):
         f"fc1_scale_merge={args.fc1_scale_merge}, act_mean_beta={args.act_mean_beta}"
     )
     model = lm.model
-    if args.fc1_scale_merge in ("act_mean", "act_p99"):
-        moe_stat_name = "moe_act_means" if args.fc1_scale_merge == "act_mean" else "moe_act_p99s"
-        moe_stat_fn = get_moe_act_means if args.fc1_scale_merge == "act_mean" else get_moe_act_p99s
-        moe_act_means = load_or_compute_smooth_stat(
-            args,
-            logger,
-            moe_stat_name,
-            lambda: moe_stat_fn(model, dataloader, args.nsamples),
-        )
-        prepare_shared_layer_outlier_scores(args, logger, moe_act_means)
-        act_samples = {}
-        weight_scores = {}
-        router_logits = {}
-    else:
-        moe_act_means = None
-        act_samples = load_or_compute_smooth_stat(
-            args,
-            logger,
-            "act_samples",
-            lambda: get_act_samples(model, dataloader, args.nsamples),
-        )
-        weight_scores = load_or_compute_smooth_stat(
-            args,
-            logger,
-            "weight_scores",
-            lambda: get_weight_scores(model),
-        )
-        router_logits = load_or_compute_smooth_stat(
-            args,
-            logger,
-            "router_logits",
-            lambda: get_router_logits(model, dataloader, args.nsamples),
-        )
+    if args.fc1_scale_merge not in ("act_mean", "act_p99"):
+        raise ValueError("--fc1_scale_merge must be act_mean or act_p99")
+    moe_stat_name = "moe_act_means" if args.fc1_scale_merge == "act_mean" else "moe_act_p99s"
+    moe_stat_fn = get_moe_act_means if args.fc1_scale_merge == "act_mean" else get_moe_act_p99s
+    moe_act_stats = load_or_compute_smooth_stat(
+        args,
+        logger,
+        moe_stat_name,
+        lambda: moe_stat_fn(model, dataloader, args.nsamples),
+    )
+    moe_fc1_smooth_scales = build_moe_fc1_smooth_scales(
+        moe_act_stats,
+        act_mean_beta=args.act_mean_beta,
+        model=model,
+    )
+    logger.info(f"built moe_fc1_smooth_scales entries: {len(moe_fc1_smooth_scales)}")
     act_scales = load_or_compute_smooth_stat(
         args,
         logger,
@@ -341,15 +300,22 @@ def apply_optional_smooth(lm, args, dataloader):
         model,
         act_scales,
         act_per_channel_scales,
-        act_samples,
-        weight_scores,
-        router_logits,
+        {},
+        {},
+        {},
         fc1_scale_merge=args.fc1_scale_merge,
         alpha=args.alpha,
         otsu_ratio=args.otsu_ratio,
         otsu_smooth_rate=args.otsu_smooth_rate,
-        moe_act_means=moe_act_means,
-        act_mean_beta=args.act_mean_beta,
+        moe_fc1_smooth_scales=moe_fc1_smooth_scales,
+        logger=logger,
+    )
+    args.moe_outlier_scores = prepare_moe_outlier_scores(
+        model,
+        score_method=args.moe_outlier_score,
+        moe_fc1_smooth_scales=moe_fc1_smooth_scales,
+        args=args,
+        model_name=args.model_name,
         logger=logger,
     )
     cleanup_memory()
@@ -362,45 +328,35 @@ def parse_expert_name(name):
     return int(m.group(1)), int(m.group(2))
 
 
-def _get_shared_layer_outlier_scores(args, layer_idx, in_features):
-    if getattr(args, "moe_outlier_shared_layer_score", "none") != "smooth_scale":
-        return None
-    scores_by_layer = getattr(args, "moe_outlier_shared_layer_scores", None) or {}
-    if layer_idx not in scores_by_layer:
-        raise KeyError(f"missing shared smooth_scale outlier scores for MoE layer {layer_idx}")
-    scores = scores_by_layer[layer_idx].detach().float().cpu().flatten()
-    if scores.numel() != in_features:
-        raise ValueError(
-            f"shared smooth_scale outlier scores for MoE layer {layer_idx} have "
-            f"{scores.numel()} channels, expected {in_features}"
-        )
-    return torch.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0).clamp(min=0)
-
-
-def _topk_outlier_input_channels_for_weight(weight, args, layer_idx, expert_idx):
+def _topk_outlier_input_channels_for_weight(weight, args, module_name):
     topk = min(int(getattr(args, "moe_outlier_topk", 0)), int(weight.shape[1]))
     if topk <= 0:
         return torch.empty(0, dtype=torch.long)
 
-    shared_scores = _get_shared_layer_outlier_scores(args, layer_idx, int(weight.shape[1]))
-    if shared_scores is not None:
-        return torch.topk(shared_scores, k=topk, largest=True, sorted=True).indices.to(torch.long)
+    scores_by_module = getattr(args, "moe_outlier_scores", None) or {}
+    if module_name in scores_by_module:
+        scores = scores_by_module[module_name].detach().float().cpu().flatten()
+    elif getattr(args, "moe_outlier_score", "weight_max") == "weight_max":
+        scores = weight.detach().abs().amax(dim=0).float().cpu()
+    else:
+        raise KeyError(f"missing moe_outlier_scores for {module_name}")
 
-    score_method = getattr(args, "moe_outlier_score", "weight_max")
-    if score_method != "weight_max":
+    if scores.numel() != int(weight.shape[1]):
         raise ValueError(
-            "planner post-outlier residual scoring currently supports "
-            "--moe_outlier_score weight_max or --moe_outlier_shared_layer_score smooth_scale"
+            f"moe_outlier_scores for {module_name} have {scores.numel()} channels, "
+            f"expected {int(weight.shape[1])}"
         )
-    scores = weight.detach().abs().amax(dim=0).float().cpu()
-    scores = torch.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0)
+    scores = torch.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0).clamp(min=0)
+    if scores.numel() == 0 or scores.max().item() <= 0:
+        raise ValueError(f"invalid all-zero moe_outlier_scores for {module_name}")
     return torch.topk(scores, k=topk, largest=True, sorted=True).indices.to(torch.long)
 
 
 def _weight_for_post_outlier_residual_stats(weight, args, layer_idx, expert_idx, proj_name):
     if proj_name not in ("gate_proj", "up_proj"):
         return weight, 0
-    outlier_idx = _topk_outlier_input_channels_for_weight(weight, args, layer_idx, expert_idx)
+    module_name = f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.{proj_name}"
+    outlier_idx = _topk_outlier_input_channels_for_weight(weight, args, module_name)
     if outlier_idx.numel() == 0:
         return weight, 0
     residual_weight = weight.detach().clone()
@@ -991,7 +947,7 @@ def build_metric_plan(rows, args, metric, low_candidate, high_candidate):
     avg_sum_bits = sum(float(item["sum_bits_cost"]) for item in plan) / max(len(plan), 1)
     all_scores = record_score_values
     summary = {
-        "format": f"duquant_{args.model_family}_expert_distribution_plan_v2",
+        "format": f"duquant_{args.model_name}_expert_distribution_plan_v2",
         "metric": metric,
         "score_key": score_key,
         "selection_scope": args.selection_scope,
@@ -1117,7 +1073,7 @@ def plot_heatmaps(rows, high_experts_by_metric, args, output_dir):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default=str(ROOT_DIR / "local_models" / "olmoe_compat"))
-    parser.add_argument("--net", default="olmoe", help="model family/net name, e.g. olmoe or qwen2_moe")
+    parser.add_argument("--model_name", default="olmoe", help="model structure name, e.g. olmoe or qwen2_moe")
     parser.add_argument("--cache_dir", default=str(ROOT_DIR / "cache"))
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--calib_dataset", default="wikitext2", choices=["wikitext2", "ptb", "c4", "mix", "pile"])
@@ -1137,8 +1093,7 @@ def main():
     parser.add_argument("--high_fraction", type=float, default=None)
     parser.add_argument("--plan_projs", default="gate_proj,up_proj,down_proj")
     parser.add_argument("--moe_outlier_topk", type=int, default=0)
-    parser.add_argument("--moe_outlier_score", default="weight_max", choices=["weight_max"])
-    parser.add_argument("--moe_outlier_shared_layer_score", default="none", choices=["none", "smooth_scale"])
+    parser.add_argument("--moe_outlier_score", default="weight_max", choices=["smooth_scale", "weight_max", "weight_error"])
     parser.add_argument("--smooth", action="store_true")
     parser.add_argument("--fc1_scale_merge", default="act_mean")
     parser.add_argument("--act_mean_beta", type=float, default=2.0)
@@ -1155,20 +1110,16 @@ def main():
     parser.add_argument("--verbose_smooth_log", action="store_true")
     args = parser.parse_args()
 
-    if args.moe_outlier_shared_layer_score == "smooth_scale":
-        if not args.smooth:
-            parser.error("--moe_outlier_shared_layer_score smooth_scale requires --smooth")
-        if args.fc1_scale_merge not in ("act_mean", "act_p99"):
-            parser.error("--moe_outlier_shared_layer_score smooth_scale requires --fc1_scale_merge act_mean or act_p99")
+    if args.moe_outlier_score == "smooth_scale" and not args.smooth:
+        parser.error("--moe_outlier_score smooth_scale requires --smooth")
+    args.moe_outlier_scores = {}
 
-    if "qwen" in args.net.lower():
-        args.net = "qwen2_moe"
-        args.model_family = "qwen2_moe"
-    elif "olmoe" in args.net.lower():
-        args.net = "olmoe"
-        args.model_family = "olmoe"
+    if "qwen" in args.model_name.lower():
+        args.model_name = "qwen2_moe"
+    elif "olmoe" in args.model_name.lower():
+        args.model_name = "olmoe"
     else:
-        args.model_family = args.net.split("-")[0]
+        args.model_name = args.model_name.split("-")[0]
     started = time.perf_counter()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1190,6 +1141,14 @@ def main():
     lm.model.to(device)
     dataloader = load_calibration(args)
     apply_optional_smooth(lm, args, dataloader)
+    if not args.smooth and args.moe_outlier_topk > 0 and args.moe_outlier_score in ("weight_max", "weight_error"):
+        args.moe_outlier_scores = prepare_moe_outlier_scores(
+            lm.model,
+            score_method=args.moe_outlier_score,
+            args=args,
+            model_name=args.model_name,
+            logger=PrintLogger(verbose=args.verbose_smooth_log),
+        )
 
     weight_rows = collect_weight_rows(lm.model, args)
     activation_rows = collect_activation_rows(lm.model, dataloader, args, device)
@@ -1224,7 +1183,6 @@ def main():
                 "route_alpha": args.route_alpha,
                 "moe_outlier_topk": args.moe_outlier_topk,
                 "moe_outlier_score": args.moe_outlier_score,
-                "moe_outlier_shared_layer_score": args.moe_outlier_shared_layer_score,
                 "weight_stats_mode": "post_outlier_residual" if args.moe_outlier_topk > 0 else "full_weight",
                 "elapsed_seconds": time.perf_counter() - started,
             }
@@ -1242,7 +1200,7 @@ def main():
 
     plot_paths = plot_heatmaps(rows, high_experts_by_metric, args, output_dir)
     metadata = {
-        "format": f"duquant_{args.model_family}_expert_distribution_planner_v1",
+        "format": f"duquant_{args.model_name}_expert_distribution_planner_v1",
         "model": args.model,
         "output_dir": str(output_dir),
         "metrics": metrics,
@@ -1256,7 +1214,6 @@ def main():
         "selection_scope": args.selection_scope,
         "moe_outlier_topk": args.moe_outlier_topk,
         "moe_outlier_score": args.moe_outlier_score,
-        "moe_outlier_shared_layer_score": args.moe_outlier_shared_layer_score,
         "weight_stats_mode": "post_outlier_residual" if args.moe_outlier_topk > 0 else "full_weight",
         "elapsed_seconds": time.perf_counter() - started,
     }

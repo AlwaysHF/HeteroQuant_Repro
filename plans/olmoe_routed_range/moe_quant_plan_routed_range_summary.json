@@ -189,8 +189,7 @@
   "act_mean_beta": 1.0,
   "route_alpha": 0.5,
   "moe_outlier_topk": 64,
-  "moe_outlier_score": "weight_max",
-  "moe_outlier_shared_layer_score": "smooth_scale",
+  "moe_outlier_score": "smooth_scale",
   "weight_stats_mode": "post_outlier_residual",
   "elapsed_seconds": 102.25738912448287
 }

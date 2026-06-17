@@ -19,6 +19,10 @@ BATCH_SIZE="${BATCH_SIZE:-6}"
 NSAMPLES="${NSAMPLES:-128}"
 SEQ_LENGTH="${SEQ_LENGTH:-4096}"
 FAST_MOE_CALIB_TOKENS="${FAST_MOE_CALIB_TOKENS:-512}"
+MOE_OUTLIER_TOPK="${MOE_OUTLIER_TOPK:-64}"
+MOE_OUTLIER_QUANT="${MOE_OUTLIER_QUANT:-w8a8}"
+MOE_OUTLIER_SCORE="${MOE_OUTLIER_SCORE:-smooth_scale}"
+DISABLE_MOE_GATE_UP_DUQUANT_ROTATION="${DISABLE_MOE_GATE_UP_DUQUANT_ROTATION:-1}"
 
 cd "$ROOT"
 
@@ -27,9 +31,14 @@ if [[ -n "$TASKS" ]]; then
   task_args=(--tasks "$TASKS" --num_fewshot "$NUM_FEWSHOT" --batch_size "$BATCH_SIZE")
 fi
 
+gate_up_rotation_args=()
+if [[ "$DISABLE_MOE_GATE_UP_DUQUANT_ROTATION" == "1" || "$DISABLE_MOE_GATE_UP_DUQUANT_ROTATION" == "true" || "$DISABLE_MOE_GATE_UP_DUQUANT_ROTATION" == "TRUE" ]]; then
+  gate_up_rotation_args=(--disable_moe_gate_up_duquant_rotation)
+fi
+
 python3 main.py \
   --model "$MODEL" \
-  --net qwen2_moe \
+  --model_name qwen2_moe \
   --wbits 4 --abits 8 \
   --router_wbits 8 --router_abits 8 \
   --cache_dir "$CACHE_DIR" \
@@ -47,10 +56,10 @@ python3 main.py \
   --fc1_scale_merge act_p99 \
   --act_mean_beta 1 \
   --moe_down_smooth_mode otsu \
-  --moe_outlier_topk 64 \
-  --moe_outlier_quant w8a8 \
-  --disable_moe_gate_up_duquant_rotation \
+  --moe_outlier_topk "$MOE_OUTLIER_TOPK" \
+  --moe_outlier_quant "$MOE_OUTLIER_QUANT" \
+  --moe_outlier_score "$MOE_OUTLIER_SCORE" \
+  "${gate_up_rotation_args[@]}" \
   --moe_quant_plan "$PLAN_PATH" \
-  --moe_outlier_shared_layer_score smooth_scale \
   --fast_moe_down_calibration \
   --fast_moe_calib_tokens "$FAST_MOE_CALIB_TOKENS"

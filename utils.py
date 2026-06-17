@@ -163,10 +163,11 @@ device_map_pangumoe = {'model.embed_tokens': 1,
 from accelerate.big_modeling import dispatch_model
 
 
-def convert_device(lm, args):
-    if "pangumoe" in args.net.lower():
+def convert_device(lm, model_name):
+    model_name = model_name.lower()
+    if "pangumoe" in model_name:
         dispatch_model(lm.model, device_map=device_map_pangumoe)
-    elif "olmoe" in args.net.lower():
+    elif "olmoe" in model_name:
         dispatch_model(lm.model, device_map=device_map_olmoe)
     else:
         lm.model = lm.model.to(used_device)
@@ -182,7 +183,7 @@ def evaluate(lm, args, logger):
     args.seq_length = 2048 # use fixed seq_length for inference
 
     results = {}
-    convert_device(lm, args)
+    convert_device(lm, args.model_name)
 
     if args.eval_ppl:
         test_datasets = getattr(args, "test_dataset", "wikitext2,c4")
@@ -191,7 +192,7 @@ def evaluate(lm, args, logger):
         if not test_datasets:
             test_datasets = ["wikitext2"]
         for dataset in test_datasets:
-            cache_testloader = f'{args.cache_dir}/testloader_{args.model_family}_{dataset}_{args.seq_length}_all.cache'
+            cache_testloader = f'{args.cache_dir}/testloader_{args.model_name}_{dataset}_{args.seq_length}_all.cache'
             if os.path.exists(cache_testloader):
                 testloader = torch.load(cache_testloader)
             else:
@@ -415,7 +416,7 @@ def get_router_logits(model, dataloader, num_samples=128):
     return router_logits_list
 
 
-def get_router_selected_experts(model, dataloader, top_k=8, num_samples=128, net="olmoe"):
+def get_router_selected_experts(model, dataloader, top_k=8, num_samples=128, model_name="olmoe"):
     print("get_router_selected_experts")
     model.eval()
     device = next(model.parameters()).device
