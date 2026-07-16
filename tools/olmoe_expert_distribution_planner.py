@@ -364,7 +364,7 @@ def _weight_for_post_outlier_residual_stats(weight, args, layer_idx, expert_idx,
     return residual_weight, int(outlier_idx.numel())
 
 
-def _relative_weight_quant_error(weight, candidate):
+def _relative_weight_quant_error(weight, candidate, weight_channel_group_size=None):
     if weight is None or not torch.is_tensor(weight) or weight.numel() == 0:
         return 0.0
     if int(candidate.wbits) >= 16:
@@ -376,6 +376,7 @@ def _relative_weight_quant_error(weight, candidate):
         reduce_dim=1,
         symmetric=False,
         group_size=candidate.weight_group_size,
+        output_channel_group_size=weight_channel_group_size,
     ).detach().float()
     diff_sq = (wf - qwf).pow(2).sum()
     base_sq = wf.pow(2).sum().clamp(min=1e-12)
@@ -390,6 +391,13 @@ def collect_weight_rows(model, args):
     rows = {}
     low_qerr_candidate = getattr(args, "_qerr_low_candidate", parse_candidate_quant(args.low_quant))
     high_qerr_candidate = getattr(args, "_qerr_high_candidate", parse_candidate_quant(args.high_quant))
+    weight_score_projs = set(parse_str_list(getattr(args, "weight_score_projs", "gate_proj,up_proj,down_proj")))
+    valid_projs = {"gate_proj", "up_proj", "down_proj"}
+    if not weight_score_projs:
+        raise ValueError("--weight_score_projs must select at least one projection")
+    invalid_projs = sorted(weight_score_projs - valid_projs)
+    if invalid_projs:
+        raise ValueError(f"invalid --weight_score_projs entries: {invalid_projs}")
     for name, module in model.named_modules():
         parsed = parse_expert_name(name)
         if parsed is None:
@@ -421,15 +429,24 @@ def collect_weight_rows(model, args):
             summary = stats.finalize(f"weight_{proj_name}")
             item.update(summary)
             item[f"weight_{proj_name}_outlier_removed_channels"] = int(removed_channels)
-            low_qerr = _relative_weight_quant_error(weight_for_stats, low_qerr_candidate)
-            high_qerr = _relative_weight_quant_error(weight_for_stats, high_qerr_candidate)
+            low_qerr = _relative_weight_quant_error(
+                weight_for_stats,
+                low_qerr_candidate,
+                weight_channel_group_size=args.weight_channel_group_size,
+            )
+            high_qerr = _relative_weight_quant_error(
+                weight_for_stats,
+                high_qerr_candidate,
+                weight_channel_group_size=args.weight_channel_group_size,
+            )
             item[f"weight_{proj_name}_residual_qerr"] = float(low_qerr)
             item[f"weight_{proj_name}_residual_qerr_gain"] = float(max(low_qerr - high_qerr, 0.0))
-            tail_vals.append(summary[f"weight_{proj_name}_tail_p99_p50"])
-            range_vals.append(summary[f"weight_{proj_name}_range_max_p99"])
-            kurt_vals.append(summary[f"weight_{proj_name}_kurtosis_raw"])
-            qerr_vals.append(low_qerr)
-            qerr_gain_vals.append(max(low_qerr - high_qerr, 0.0))
+            if proj_name in weight_score_projs:
+                tail_vals.append(summary[f"weight_{proj_name}_tail_p99_p50"])
+                range_vals.append(summary[f"weight_{proj_name}_range_max_p99"])
+                kurt_vals.append(summary[f"weight_{proj_name}_kurtosis_raw"])
+                qerr_vals.append(low_qerr)
+                qerr_gain_vals.append(max(low_qerr - high_qerr, 0.0))
         item["weight_tail"] = float(sum(tail_vals) / max(len(tail_vals), 1))
         item["weight_range"] = float(sum(range_vals) / max(len(range_vals), 1))
         item["weight_kurtosis"] = float(sum(kurt_vals) / max(len(kurt_vals), 1))
@@ -555,33 +572,52 @@ def rank_values(rows, key):
     return ranks
 
 
-def add_scores(rows, route_alpha):
+def score_component(value, score_transform):
+    value = max(float(value), 0.0)
+    if score_transform == "log":
+        return math.log1p(value)
+    if score_transform == "raw":
+        return value
+    raise ValueError(f"unknown score_transform: {score_transform}")
+
+
+def add_scores(
+    rows,
+    route_alpha,
+    score_transform="log",
+    input_score_coef=1.0,
+    down_score_coef=1.0,
+    weight_score_coef=0.5,
+):
+    input_score_coef = float(input_score_coef)
+    down_score_coef = float(down_score_coef)
+    weight_score_coef = float(weight_score_coef)
     for row in rows:
         row["tail_score"] = (
-            math.log1p(max(row.get("input_tail", 0.0), 0.0))
-            + math.log1p(max(row.get("down_tail", 0.0), 0.0))
-            + 0.5 * math.log1p(max(row.get("weight_tail", 0.0), 0.0))
+            input_score_coef * score_component(row.get("input_tail", 0.0), score_transform)
+            + down_score_coef * score_component(row.get("down_tail", 0.0), score_transform)
+            + weight_score_coef * score_component(row.get("weight_tail", 0.0), score_transform)
         )
         row["range_score"] = (
-            math.log1p(max(row.get("input_range", 0.0), 0.0))
-            + math.log1p(max(row.get("down_range", 0.0), 0.0))
-            + 0.5 * math.log1p(max(row.get("weight_range", 0.0), 0.0))
+            input_score_coef * score_component(row.get("input_range", 0.0), score_transform)
+            + down_score_coef * score_component(row.get("down_range", 0.0), score_transform)
+            + weight_score_coef * score_component(row.get("weight_range", 0.0), score_transform)
         )
         row["kurtosis_score"] = (
-            math.log1p(max(row.get("input_kurtosis", 0.0), 0.0))
-            + math.log1p(max(row.get("down_kurtosis", 0.0), 0.0))
-            + 0.5 * math.log1p(max(row.get("weight_kurtosis", 0.0), 0.0))
+            input_score_coef * score_component(row.get("input_kurtosis", 0.0), score_transform)
+            + down_score_coef * score_component(row.get("down_kurtosis", 0.0), score_transform)
+            + weight_score_coef * score_component(row.get("weight_kurtosis", 0.0), score_transform)
         )
         row["input_score"] = row["tail_score"] + row["range_score"]
         row["down_score"] = (
-            math.log1p(max(row.get("down_tail", 0.0), 0.0))
-            + math.log1p(max(row.get("down_range", 0.0), 0.0))
-            + math.log1p(max(row.get("down_kurtosis", 0.0), 0.0))
+            score_component(row.get("down_tail", 0.0), score_transform)
+            + score_component(row.get("down_range", 0.0), score_transform)
+            + score_component(row.get("down_kurtosis", 0.0), score_transform)
         )
         row["weight_score"] = (
-            math.log1p(max(row.get("weight_tail", 0.0), 0.0))
-            + math.log1p(max(row.get("weight_range", 0.0), 0.0))
-            + math.log1p(max(row.get("weight_kurtosis", 0.0), 0.0))
+            score_component(row.get("weight_tail", 0.0), score_transform)
+            + score_component(row.get("weight_range", 0.0), score_transform)
+            + score_component(row.get("weight_kurtosis", 0.0), score_transform)
         )
         random_key = f"{int(row['layer_index'])}:{int(row['expert_index'])}".encode("utf-8")
         row["random_score"] = int(hashlib.sha256(random_key).hexdigest()[:16], 16) / float(16 ** 16)
@@ -751,7 +787,15 @@ def projection_weight_components(row, proj_name):
     }
 
 
-def projection_score(row, metric, proj_name):
+def projection_score(
+    row,
+    metric,
+    proj_name,
+    score_transform="log",
+    input_score_coef=1.0,
+    down_score_coef=1.0,
+    weight_score_coef=0.5,
+):
     routed = False
     base_metric = metric
     if base_metric.startswith("routed_"):
@@ -768,9 +812,21 @@ def projection_score(row, metric, proj_name):
         act_prefix = "input"
     weight = projection_weight_components(row, proj_name)
 
-    tail_score = math.log1p(max(float(row.get(f"{act_prefix}_tail", 0.0)), 0.0)) + 0.5 * math.log1p(max(weight["tail"], 0.0))
-    range_score = math.log1p(max(float(row.get(f"{act_prefix}_range", 0.0)), 0.0)) + 0.5 * math.log1p(max(weight["range"], 0.0))
-    kurtosis_score = math.log1p(max(float(row.get(f"{act_prefix}_kurtosis", 0.0)), 0.0)) + 0.5 * math.log1p(max(weight["kurtosis"], 0.0))
+    tail_score = (
+        float(input_score_coef if act_prefix == "input" else down_score_coef)
+        * score_component(row.get(f"{act_prefix}_tail", 0.0), score_transform)
+        + float(weight_score_coef) * score_component(weight["tail"], score_transform)
+    )
+    range_score = (
+        float(input_score_coef if act_prefix == "input" else down_score_coef)
+        * score_component(row.get(f"{act_prefix}_range", 0.0), score_transform)
+        + float(weight_score_coef) * score_component(weight["range"], score_transform)
+    )
+    kurtosis_score = (
+        float(input_score_coef if act_prefix == "input" else down_score_coef)
+        * score_component(row.get(f"{act_prefix}_kurtosis", 0.0), score_transform)
+        + float(weight_score_coef) * score_component(weight["kurtosis"], score_transform)
+    )
 
     if base_metric == "tail":
         score = tail_score
@@ -785,7 +841,11 @@ def projection_score(row, metric, proj_name):
     elif base_metric == "down":
         score = float(row.get("down_score", 0.0)) if proj_name == "down_proj" else 0.0
     elif base_metric == "weight":
-        score = math.log1p(max(weight["tail"], 0.0)) + math.log1p(max(weight["range"], 0.0)) + math.log1p(max(weight["kurtosis"], 0.0))
+        score = (
+            score_component(weight["tail"], score_transform)
+            + score_component(weight["range"], score_transform)
+            + score_component(weight["kurtosis"], score_transform)
+        )
     elif base_metric == "residual_qerr":
         score = float(row.get(f"weight_{proj_name}_residual_qerr", row.get("weight_residual_qerr", 0.0)))
     elif base_metric == "residual_qerr_gain":
@@ -826,7 +886,15 @@ def make_plan_records(rows, args, metric, score_key):
                         "proj_name": proj_name,
                         "proj_names": [proj_name],
                         "row": row,
-                        "score": projection_score(row, metric, proj_name),
+                        "score": projection_score(
+                            row,
+                            metric,
+                            proj_name,
+                            score_transform=args.score_transform,
+                            input_score_coef=args.input_score_coef,
+                            down_score_coef=args.down_score_coef,
+                            weight_score_coef=args.weight_score_coef,
+                        ),
                     }
                 )
         else:
@@ -956,6 +1024,12 @@ def build_metric_plan(rows, args, metric, low_candidate, high_candidate):
         "actual_avg_sum_bits": float(avg_sum_bits),
         "target_equivalent_avg_aw_bits": float(args.target_avg_sum_bits) / 2.0,
         "actual_equivalent_avg_aw_bits": float(avg_sum_bits) / 2.0,
+        "weight_channel_group_size": args.weight_channel_group_size,
+        "score_transform": args.score_transform,
+        "input_score_coef": float(args.input_score_coef),
+        "down_score_coef": float(args.down_score_coef),
+        "weight_score_coef": float(args.weight_score_coef),
+        "weight_score_projs": parse_str_list(args.weight_score_projs),
         "num_experts": len(rows),
         "num_records": len(records),
         "num_modules": len(plan),
@@ -1085,6 +1159,11 @@ def main():
     parser.add_argument("--selection_scope", default="per_layer", choices=["per_layer", "global"])
     parser.add_argument("--plan_granularity", default="expert", choices=["expert", "projection"])
     parser.add_argument("--route_alpha", type=float, default=0.5)
+    parser.add_argument("--score_transform", default="log", choices=["log", "raw"])
+    parser.add_argument("--input_score_coef", type=float, default=1.0)
+    parser.add_argument("--down_score_coef", type=float, default=1.0)
+    parser.add_argument("--weight_score_coef", type=float, default=0.5)
+    parser.add_argument("--weight_score_projs", default="gate_proj,up_proj,down_proj")
     parser.add_argument("--low_quant", default="w4g-1-a4g-1")
     parser.add_argument("--high_quant", default="w8g-1-a8g-1")
     parser.add_argument("--tier_quants", default=None, help="comma-separated candidates ordered from low cost to high cost")
@@ -1092,6 +1171,12 @@ def main():
     parser.add_argument("--target_avg_sum_bits", type=float, default=12.0)
     parser.add_argument("--high_fraction", type=float, default=None)
     parser.add_argument("--plan_projs", default="gate_proj,up_proj,down_proj")
+    parser.add_argument(
+        "--weight_channel_group_size",
+        type=int,
+        default=None,
+        help="output-channel group size for residual qerr simulation; -1 means one tensor scale per matrix",
+    )
     parser.add_argument("--moe_outlier_topk", type=int, default=0)
     parser.add_argument("--moe_outlier_score", default="weight_max", choices=["smooth_scale", "weight_max", "weight_error"])
     parser.add_argument("--smooth", action="store_true")
@@ -1157,7 +1242,14 @@ def main():
         row = dict(weight_rows[key])
         row.update(activation_rows.get(key, {}))
         rows.append(row)
-    add_scores(rows, args.route_alpha)
+    add_scores(
+        rows,
+        args.route_alpha,
+        score_transform=args.score_transform,
+        input_score_coef=args.input_score_coef,
+        down_score_coef=args.down_score_coef,
+        weight_score_coef=args.weight_score_coef,
+    )
 
     scores_csv = output_dir / "expert_distribution_scores.csv"
     scores_json = output_dir / "expert_distribution_scores.json"
@@ -1181,6 +1273,11 @@ def main():
                 "fc1_scale_merge": args.fc1_scale_merge,
                 "act_mean_beta": args.act_mean_beta,
                 "route_alpha": args.route_alpha,
+                "score_transform": args.score_transform,
+                "input_score_coef": float(args.input_score_coef),
+                "down_score_coef": float(args.down_score_coef),
+                "weight_score_coef": float(args.weight_score_coef),
+                "weight_score_projs": parse_str_list(args.weight_score_projs),
                 "moe_outlier_topk": args.moe_outlier_topk,
                 "moe_outlier_score": args.moe_outlier_score,
                 "weight_stats_mode": "post_outlier_residual" if args.moe_outlier_topk > 0 else "full_weight",

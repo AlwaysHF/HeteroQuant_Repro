@@ -22,6 +22,8 @@ FAST_MOE_CALIB_TOKENS="${FAST_MOE_CALIB_TOKENS:-512}"
 MOE_OUTLIER_TOPK="${MOE_OUTLIER_TOPK:-64}"
 MOE_OUTLIER_QUANT="${MOE_OUTLIER_QUANT:-w8a8}"
 MOE_OUTLIER_SCORE="${MOE_OUTLIER_SCORE:-smooth_scale}"
+WEIGHT_CHANNEL_GROUP_SIZE="${WEIGHT_CHANNEL_GROUP_SIZE:-1}"
+ROUTER_WEIGHT_CHANNEL_GROUP_SIZE="${ROUTER_WEIGHT_CHANNEL_GROUP_SIZE:-$WEIGHT_CHANNEL_GROUP_SIZE}"
 DISABLE_MOE_GATE_UP_DUQUANT_ROTATION="${DISABLE_MOE_GATE_UP_DUQUANT_ROTATION:-1}"
 
 cd "$ROOT"
@@ -51,6 +53,8 @@ python3 main.py \
   --test_dataset "$TEST_DATASET" \
   "${task_args[@]}" \
   --group_size -1 \
+  --weight_channel_group_size "$WEIGHT_CHANNEL_GROUP_SIZE" \
+  --router_weight_channel_group_size "$ROUTER_WEIGHT_CHANNEL_GROUP_SIZE" \
   --act_group_size -1 \
   --smooth \
   --fc1_scale_merge act_p99 \

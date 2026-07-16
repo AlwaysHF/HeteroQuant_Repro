@@ -21,17 +21,88 @@ def _normalize_group_size(value):
     return value
 
 
+def _normalize_weight_channel_group_size(value):
+    if value is None:
+        return None
+    value = int(value)
+    if value == -1:
+        return -1
+    if value <= 1:
+        return None
+    return value
+
+
+def _reshape_weight_to_channel_groups(weight, weight_channel_group_size, group_size):
+    weight_channel_group_size = _normalize_weight_channel_group_size(weight_channel_group_size)
+    if weight_channel_group_size is None or weight.ndim != 2:
+        return None, None
+
+    out_channels, in_channels = weight.shape
+    output_group_size = out_channels if weight_channel_group_size == -1 else min(weight_channel_group_size, out_channels)
+    if output_group_size <= 1:
+        return None, None
+
+    out_pad = (output_group_size - out_channels % output_group_size) % output_group_size
+    input_group_size = _normalize_group_size(group_size)
+    if input_group_size is not None:
+        in_pad = (input_group_size - in_channels % input_group_size) % input_group_size
+    else:
+        in_pad = 0
+
+    x = weight
+    if out_pad > 0 or in_pad > 0:
+        x = F.pad(x, (0, in_pad, 0, out_pad))
+
+    padded_out, padded_in = x.shape
+    out_groups = padded_out // output_group_size
+    if input_group_size is not None:
+        input_groups = padded_in // input_group_size
+        x = x.reshape(out_groups, output_group_size, input_groups, input_group_size)
+        reduce_dims = (1, 3)
+    else:
+        x = x.reshape(out_groups, output_group_size, padded_in)
+        reduce_dims = (1, 2)
+
+    meta = {
+        "original_shape": tuple(weight.shape),
+        "padded_shape": (padded_out, padded_in),
+        "out_pad": out_pad,
+        "in_pad": in_pad,
+        "reduce_dims": reduce_dims,
+    }
+    return x, meta
+
+
+def _restore_weight_channel_groups(x, meta):
+    padded_out, padded_in = meta["padded_shape"]
+    x = x.reshape(padded_out, padded_in)
+    out_channels, in_channels = meta["original_shape"]
+    if meta["out_pad"] > 0:
+        x = x.narrow(0, 0, out_channels)
+    if meta["in_pad"] > 0:
+        x = x.narrow(1, 0, in_channels)
+    return x
+
+
 @torch.no_grad()
-def fake_quant_weight_for_outlier_score(weight, n_bits, symmetric, group_size=None):
+def fake_quant_weight_for_outlier_score(weight, n_bits, symmetric, group_size=None, weight_channel_group_size=None):
     if int(n_bits) >= 16:
         return weight.detach().float()
 
     x = weight.detach().float()
     original_shape = tuple(x.shape)
     group_size = _normalize_group_size(group_size)
+    channel_grouped_x, channel_group_meta = _reshape_weight_to_channel_groups(
+        x,
+        weight_channel_group_size,
+        group_size,
+    )
     padded_shape = None
     pad = 0
-    if group_size is not None:
+    if channel_grouped_x is not None:
+        x = channel_grouped_x
+        reduce_dims = channel_group_meta["reduce_dims"]
+    elif group_size is not None:
         last_dim = x.shape[-1]
         deficiency = last_dim % group_size
         pad = 0 if deficiency == 0 else group_size - deficiency
@@ -39,26 +110,30 @@ def fake_quant_weight_for_outlier_score(weight, n_bits, symmetric, group_size=No
             x = F.pad(x, (0, pad))
         padded_shape = tuple(x.shape)
         x = x.reshape(-1, group_size)
+        reduce_dims = -1
     else:
         x = x.reshape(-1, x.shape[-1])
+        reduce_dims = -1
 
     if symmetric:
         qmin = -(2 ** (int(n_bits) - 1))
         qmax = 2 ** (int(n_bits) - 1) - 1
-        scale = x.abs().amax(dim=-1, keepdim=True).clamp(min=1e-5) / max(qmax, 1)
+        scale = x.abs().amax(dim=reduce_dims, keepdim=True).clamp(min=1e-5) / max(qmax, 1)
         x_int = torch.round(x / scale).clamp(qmin, qmax)
         x_dequant = x_int * scale
     else:
         qmin = 0
         qmax = 2 ** int(n_bits) - 1
-        xmin = x.amin(dim=-1, keepdim=True)
-        xmax = x.amax(dim=-1, keepdim=True)
+        xmin = x.amin(dim=reduce_dims, keepdim=True)
+        xmax = x.amax(dim=reduce_dims, keepdim=True)
         scale = (xmax - xmin).clamp(min=1e-5) / max(qmax - qmin, 1)
         zero = torch.round(qmin - xmin / scale).clamp(qmin, qmax)
         x_int = (torch.round(x / scale) + zero).clamp(qmin, qmax)
         x_dequant = (x_int - zero) * scale
 
-    if padded_shape is not None:
+    if channel_group_meta is not None:
+        x_dequant = _restore_weight_channel_groups(x_dequant, channel_group_meta)
+    elif padded_shape is not None:
         x_dequant = x_dequant.reshape(padded_shape)
         if pad > 0:
             x_dequant = x_dequant.narrow(-1, 0, original_shape[-1])
@@ -72,8 +147,15 @@ def weight_quant_error_by_input_channel(module, args):
     n_bits = int(getattr(args, "wbits", 16))
     symmetric = bool(getattr(args, "symmetric", False))
     group_size = getattr(args, "group_size", None)
+    weight_channel_group_size = getattr(args, "weight_channel_group_size", None)
     weight = module.weight.detach().float().cpu()
-    quant_weight = fake_quant_weight_for_outlier_score(weight, n_bits, symmetric, group_size)
+    quant_weight = fake_quant_weight_for_outlier_score(
+        weight,
+        n_bits,
+        symmetric,
+        group_size,
+        weight_channel_group_size,
+    )
     return (weight - quant_weight).pow(2).sum(dim=0)
 
 

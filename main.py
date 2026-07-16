@@ -196,6 +196,17 @@ def _normalize_group_size(value):
     return value
 
 
+def _normalize_weight_channel_group_size(value):
+    if value is None:
+        return None
+    value = int(value)
+    if value == -1:
+        return -1
+    if value <= 1:
+        return None
+    return value
+
+
 # 功能: 解析量化配置字符串，提取 abits/wbits 和可选 group size。
 # 输入: quant_name，如 a4w4、w4g128-a8g128、a8g128-w4g128。
 # 输出: dict 或 None；成功时返回标准化量化配置，失败时返回 None。
@@ -275,6 +286,10 @@ def _load_moe_quant_plan(plan_path):
                 entry["act_group_size"] = entry["activation_group_size"]
             if "weight_group_size" not in entry and "w_group_size" in entry:
                 entry["weight_group_size"] = entry["w_group_size"]
+            if "weight_channel_group_size" not in entry and "w_channel_group_size" in entry:
+                entry["weight_channel_group_size"] = entry["w_channel_group_size"]
+            if "weight_channel_group_size" not in entry and "output_channel_group_size" in entry:
+                entry["weight_channel_group_size"] = entry["output_channel_group_size"]
 
         if "abits" not in entry or "wbits" not in entry:
             raise ValueError(f"missing abits/wbits in moe quant plan entry for {module_name}")
@@ -282,6 +297,9 @@ def _load_moe_quant_plan(plan_path):
         entry["wbits"] = int(entry["wbits"])
         entry["act_group_size"] = _normalize_group_size(entry.get("act_group_size"))
         entry["weight_group_size"] = _normalize_group_size(entry.get("weight_group_size"))
+        entry["weight_channel_group_size"] = _normalize_weight_channel_group_size(
+            entry.get("weight_channel_group_size")
+        )
         if entry["abits"] not in (4, 8, 16):
             raise ValueError(f"unsupported activation bits {entry['abits']} for {module_name}")
         if entry["wbits"] > entry["abits"]:
@@ -485,6 +503,24 @@ def main():
     parser.add_argument("--router_wbits", type=int, default=8)
     parser.add_argument("--router_abits", type=int, default=8)
     parser.add_argument("--group_size", type=int, default=None)
+    parser.add_argument(
+        "--weight_channel_group_size",
+        type=int,
+        default=None,
+        help=(
+            "number of output channels sharing one weight scale; "
+            "None/1 keeps per-output-channel scales, -1 uses one tensor scale per Linear"
+        ),
+    )
+    parser.add_argument(
+        "--router_weight_channel_group_size",
+        type=int,
+        default=None,
+        help=(
+            "output-channel group size for router weights; "
+            "defaults to --weight_channel_group_size when unset"
+        ),
+    )
     parser.add_argument("--alpha", type=float, default=0.6)
     parser.add_argument("--otsu_ratio", type=float, default=0.65)
     parser.add_argument("--otsu_smooth_rate", type=float, default=0.7)
@@ -560,6 +596,12 @@ def main():
 
     if args.moe_outlier_topk < 0:
         raise ValueError("--moe_outlier_topk must be non-negative")
+    if args.weight_channel_group_size is not None and args.weight_channel_group_size == 0:
+        raise ValueError("--weight_channel_group_size must be positive, -1, or unset")
+    if args.router_weight_channel_group_size is not None and args.router_weight_channel_group_size == 0:
+        raise ValueError("--router_weight_channel_group_size must be positive, -1, or unset")
+    if args.router_weight_channel_group_size is None:
+        args.router_weight_channel_group_size = args.weight_channel_group_size
     if args.moe_outlier_score == "smooth_scale" and not args.smooth:
         raise ValueError("--moe_outlier_score smooth_scale requires --smooth")
     args.moe_outlier_scores = {}
@@ -636,6 +678,7 @@ def main():
         "symmetric": args.symmetric,
         "dynamic_method": args.w_dynamic_method,
         "group_size": args.group_size,
+        "weight_channel_group_size": args.weight_channel_group_size,
         "swc":args.swc,
         "quant_method": args.quant_method,
         "block_size": args.block_size,
@@ -663,6 +706,7 @@ def main():
         "dynamic_method": args.router_w_dynamic_method,
         "router_top_k": getattr(lm.model.config, "num_experts_per_tok", None),
         "group_size": args.group_size,
+        "weight_channel_group_size": args.router_weight_channel_group_size,
         "swc":args.swc,
         "quant_method": args.quant_method,
         "block_size": args.block_size,

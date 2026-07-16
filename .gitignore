@@ -7,7 +7,6 @@ __pycache__/
 
 # Runtime outputs and datasets
 cache/
-experiments/
 *.log
 
 # Local model weights and machine-specific files
@@ -17,3 +16,4 @@ local_models/
 
 # Large runtime artifact. Keep outside normal Git; see README.
 Rot.pkl
+local_datasets/

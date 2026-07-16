@@ -1,0 +1,2 @@
+[2026-07-13 19:44:56 root] (main.py 594): INFO args.output_dir: /home/lwk/HeteroQuant_Repro/experiments/repro_olmoe_691_20260713_194453/heteroquant_a8w4/olmoe_compat_w4a8_Rw8a8
+[2026-07-13 19:44:56 root] (main.py 596): INFO loaded moe quant plan from /home/lwk/HeteroQuant_Repro/plans/olmoe_routed_range/moe_quant_plan_routed_range.json: 3072 expert projection entries

@@ -32,6 +32,17 @@ def _normalize_group_size(group_size):
     return group_size
 
 
+def _normalize_weight_channel_group_size(group_size):
+    if group_size is None:
+        return None
+    group_size = int(group_size)
+    if group_size == -1:
+        return -1
+    if group_size <= 1:
+        return None
+    return group_size
+
+
 # mlp.gate, v.shape: torch.Size([12800, 5120]) => torch.Size([16, 800, 5120])
 def cali_kld_top_batch(ori_logits, logits, top_k):
     logits = logits.reshape(-1, seqlen, logits.shape[-1]).to(torch.float32)
@@ -63,6 +74,7 @@ class UniformAffineQuantizer(nn.Module):
         dynamic=False,
         dynamic_method="per_cluster",
         group_size=None,
+        weight_channel_group_size=None,
         shape=None,
         swc=None,
         lac=None,
@@ -83,6 +95,7 @@ class UniformAffineQuantizer(nn.Module):
         super().__init__()
         group_size = _normalize_group_size(group_size)
         act_group_size = _normalize_group_size(act_group_size)
+        weight_channel_group_size = _normalize_weight_channel_group_size(weight_channel_group_size)
         self.symmetric = symmetric
         assert 2 <= n_bits <= 16, "bitwidth not supported"
         self.n_bits = n_bits
@@ -115,6 +128,7 @@ class UniformAffineQuantizer(nn.Module):
 
         self.enable = True
         self.group_size = group_size
+        self.weight_channel_group_size = weight_channel_group_size
         self.is_weight = shape != None
         self.permutation_times = permutation_times
         self.recorded_x_max = None
@@ -144,6 +158,20 @@ class UniformAffineQuantizer(nn.Module):
     def _active_group_size(self):
         return self.group_size if self.is_weight else self.act_group_size
 
+    def _effective_weight_channel_group_size(self, x):
+        if not self.is_weight or self.weight_channel_group_size is None or x.ndim != 2:
+            return None
+        out_channels = int(x.shape[0])
+        if out_channels <= 1:
+            return None
+        if self.weight_channel_group_size == -1:
+            return out_channels
+        return min(int(self.weight_channel_group_size), out_channels)
+
+    def _use_weight_channel_groups(self, x):
+        group_size = self._effective_weight_channel_group_size(x)
+        return group_size is not None and group_size > 1
+
     def _reshape_to_groups(self, x, group_size):
         if not group_size:
             return x, None, 0
@@ -166,9 +194,105 @@ class UniformAffineQuantizer(nn.Module):
             x = x.narrow(-1, 0, original_shape[-1])
         return x
 
+    def _reshape_weight_to_channel_groups(self, x):
+        output_group_size = self._effective_weight_channel_group_size(x)
+        if output_group_size is None:
+            return x, None
+
+        original_shape = tuple(x.shape)
+        out_channels, in_channels = original_shape
+        out_pad = (output_group_size - out_channels % output_group_size) % output_group_size
+        input_group_size = self.group_size
+        if input_group_size is not None:
+            in_pad = (input_group_size - in_channels % input_group_size) % input_group_size
+        else:
+            in_pad = 0
+
+        if out_pad > 0 or in_pad > 0:
+            x = F.pad(x, (0, in_pad, 0, out_pad))
+
+        padded_out, padded_in = x.shape
+        out_groups = padded_out // output_group_size
+        if input_group_size is not None:
+            input_groups = padded_in // input_group_size
+            x = x.reshape(out_groups, output_group_size, input_groups, input_group_size)
+            reduce_dims = (1, 3)
+        else:
+            input_groups = None
+            x = x.reshape(out_groups, output_group_size, padded_in)
+            reduce_dims = (1, 2)
+
+        meta = {
+            "kind": "weight_channel",
+            "original_shape": original_shape,
+            "out_pad": out_pad,
+            "in_pad": in_pad,
+            "output_group_size": output_group_size,
+            "input_group_size": input_group_size,
+            "input_groups": input_groups,
+            "padded_shape": (padded_out, padded_in),
+            "reduce_dims": reduce_dims,
+        }
+        return x, meta
+
+    def _restore_weight_from_channel_groups(self, x, meta):
+        padded_out, padded_in = meta["padded_shape"]
+        x = x.reshape(padded_out, padded_in)
+        out_channels, in_channels = meta["original_shape"]
+        if meta["out_pad"] > 0:
+            x = x.narrow(0, 0, out_channels)
+        if meta["in_pad"] > 0:
+            x = x.narrow(1, 0, in_channels)
+        return x
+
+    def _reshape_for_quant(self, x):
+        if self._use_weight_channel_groups(x):
+            return self._reshape_weight_to_channel_groups(x)
+        x, original_shape, pad = self._reshape_to_groups(x, self._active_group_size())
+        return x, {
+            "kind": "last_dim",
+            "original_shape": original_shape,
+            "pad": pad,
+            "reduce_dims": (-1,),
+        }
+
+    def _restore_from_quant_view(self, x, meta):
+        if meta["kind"] == "weight_channel":
+            return self._restore_weight_from_channel_groups(x, meta)
+        return self._restore_from_groups(x, meta["original_shape"], meta["pad"])
+
+    def _quant_reduce_dims(self, meta):
+        return meta["reduce_dims"]
+
+    def _quant_error_score(self, x, x_q, meta):
+        err = (x - x_q).abs().pow(2)
+        err_view, _ = self._reshape_for_quant(err)
+        return err_view.sum(dim=self._quant_reduce_dims(meta), keepdim=True)
+
+    def _linear_output_score_to_quant_score(self, output_score, meta, scale_shape):
+        output_score = output_score.reshape(-1)
+        if meta["kind"] == "weight_channel":
+            out_channels = meta["original_shape"][0]
+            output_group_size = meta["output_group_size"]
+            out_pad = meta["out_pad"]
+            if out_pad > 0:
+                output_score = F.pad(output_score, (0, out_pad))
+            score = output_score.reshape(-1, output_group_size).sum(dim=1)
+            if meta["input_groups"] is not None:
+                score = score.view(-1, 1, 1, 1).expand(scale_shape)
+            else:
+                score = score.view(-1, 1, 1)
+            return score
+
+        if meta["original_shape"] is not None and self.is_weight:
+            out_channels = meta["original_shape"][0]
+            input_groups = int(scale_shape[0] // out_channels)
+            return output_score.view(out_channels, 1).repeat_interleave(input_groups, dim=0)
+
+        return output_score.reshape(scale_shape)
+
     def fake_quant(self, x, scale, round_zero_point):
-        group_size = self._active_group_size()
-        x, original_shape, pad = self._reshape_to_groups(x, group_size)
+        x, meta = self._reshape_for_quant(x)
             
         x_int = round_ste(x.float() / scale).half()    # avoid overflow
         
@@ -181,7 +305,7 @@ class UniformAffineQuantizer(nn.Module):
             x_dequant = x_dequant.sub(round_zero_point)
         x_dequant = x_dequant.mul(scale)
 
-        return self._restore_from_groups(x_dequant, original_shape, pad)  
+        return self._restore_from_quant_view(x_dequant, meta)
     
     def permutation_random(self, weight, other=None):
         hidden_dim = weight.shape[-1]
@@ -450,8 +574,9 @@ class UniformAffineQuantizer(nn.Module):
 
     def per_token_dynamic_calibration_V2(self, x, act=None, loss_type="per_channel_kl_top0"):
         act = act.view(-1, act.shape[-1]) # seq_len, hid_dim
-        x, _, _ = self._reshape_to_groups(x, self.group_size)
-        reduce_shape = [-1]
+        x_origin = x
+        x, meta = self._reshape_for_quant(x)
+        reduce_shape = self._quant_reduce_dims(meta)
         xmin_ori = x.amin(reduce_shape, keepdim=True).to(x.device)
         xmax_ori =  x.amax(reduce_shape, keepdim=True).to(x.device)
 
@@ -481,13 +606,20 @@ class UniformAffineQuantizer(nn.Module):
                 round_zero_point = zero_point.clamp(min=-CLIPMAX, max=CLIPMAX).round().clamp(self.qmin, self.qmax)
 
             x_q = (x/scale.to(x.device)).round().add(round_zero_point.to(x.device)).clamp(self.qmin, self.qmax).sub(round_zero_point.to(x.device)).mul(scale.to(x.device))
+            x_q_origin = self._restore_from_quant_view(x_q, meta)
 
-            scores = 0.0
+            scores = torch.zeros_like(xmax_ori)
             if "mse_tensor" in loss_type:
-                scores += self.lp_loss(x, x_q, p=2.0, reduction='channel1').reshape(xmax.shape)
+                scores += self._quant_error_score(x_origin, x_q_origin, meta).reshape(xmax.shape)
             if "mse_linear" in loss_type:
                 ### output = F.linear(act, weight, bias) # act(n_token, Cin), weight(Cout, Cin), bias(Cout), output(n_token, Cout)
-                scores += self.lp_loss(F.linear(act, x, None), F.linear(act, x_q, None), p=2.0, reduction='channel0').reshape(xmax.shape)
+                output_score = self.lp_loss(
+                    F.linear(act, x_origin, None),
+                    F.linear(act, x_q_origin, None),
+                    p=2.0,
+                    reduction='channel0',
+                )
+                scores += self._linear_output_score_to_quant_score(output_score, meta, xmax.shape)
             if "kl_top" in loss_type:
                 if "kl_top0" in loss_type:
                     ratio = 0
@@ -512,7 +644,7 @@ class UniformAffineQuantizer(nn.Module):
                 base_top_k = max(1, min(base_top_k, num_experts))
                 top_k = base_top_k + int(ratio * (num_experts - base_top_k))
                 top_k = max(1, min(top_k, num_experts))
-                scores += cali_kld_top_batch(F.linear(act, x, None), F.linear(act, x_q, None), top_k=top_k)
+                scores += cali_kld_top_batch(F.linear(act, x_origin, None), F.linear(act, x_q_origin, None), top_k=top_k)
 
             # logging.info('================lp_loss================')
             better_index = scores < best_score_list # find channel_wise best scale
@@ -537,8 +669,8 @@ class UniformAffineQuantizer(nn.Module):
 
 
     def per_token_dynamic_calibration(self, x):
-        x, _, _ = self._reshape_to_groups(x, self._active_group_size())
-        reduce_shape = [-1]
+        x, meta = self._reshape_for_quant(x)
+        reduce_shape = self._quant_reduce_dims(meta)
         xmin = x.amin(reduce_shape, keepdim=True).to(x.device)
         xmax =  x.amax(reduce_shape, keepdim=True).to(x.device)
         if self.swc:

@@ -65,7 +65,30 @@ def _load_c4_from_arrow_cache(split):
     return concatenate_datasets(datasets)
 
 
+def _local_c4_data_files(split):
+    roots = []
+    if os.environ.get("C4_LOCAL_DATA_DIR"):
+        roots.append(os.environ["C4_LOCAL_DATA_DIR"])
+    roots.append(os.path.join(os.path.dirname(__file__), "local_datasets", "c4"))
+    if os.environ.get("LM_EVAL_LOCAL_DATASET_ROOT"):
+        roots.append(os.path.join(os.environ["LM_EVAL_LOCAL_DATASET_ROOT"], "c4"))
+
+    filename = {
+        "train": "c4-train.00000-of-01024.json.gz",
+        "validation": "c4-validation.00000-of-00008.json.gz",
+    }[split]
+    for root in roots:
+        path = os.path.join(os.path.abspath(os.path.expanduser(root)), "en", filename)
+        if os.path.exists(path):
+            return {split: path}
+    return None
+
+
 def _load_c4_split(split):
+    local_data_files = _local_c4_data_files(split)
+    if local_data_files is not None:
+        return load_dataset("json", data_files=local_data_files, split=split)
+
     data_files = {
         "train": {"train": "en/c4-train.00000-of-01024.json.gz"},
         "validation": {"validation": "en/c4-validation.00000-of-00008.json.gz"},

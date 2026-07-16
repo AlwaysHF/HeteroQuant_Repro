@@ -1,0 +1,57 @@
+{
+  "format": "duquant_olmoe_expert_distribution_planner_v1",
+  "model": "/home/lwk/HeteroQuant_Repro/local_models/olmoe_compat",
+  "output_dir": "/home/lwk/HeteroQuant_Repro/experiments/metric_ablation_olmoe_ppl_20260714_235211/plans",
+  "metrics": [
+    "residual_qerr_gain",
+    "residual_qerr",
+    "kurtosis",
+    "route",
+    "tail"
+  ],
+  "plan_paths": {
+    "residual_qerr_gain": "/home/lwk/HeteroQuant_Repro/experiments/metric_ablation_olmoe_ppl_20260714_235211/plans/moe_quant_plan_residual_qerr_gain.json",
+    "residual_qerr": "/home/lwk/HeteroQuant_Repro/experiments/metric_ablation_olmoe_ppl_20260714_235211/plans/moe_quant_plan_residual_qerr.json",
+    "kurtosis": "/home/lwk/HeteroQuant_Repro/experiments/metric_ablation_olmoe_ppl_20260714_235211/plans/moe_quant_plan_kurtosis.json",
+    "route": "/home/lwk/HeteroQuant_Repro/experiments/metric_ablation_olmoe_ppl_20260714_235211/plans/moe_quant_plan_route.json",
+    "tail": "/home/lwk/HeteroQuant_Repro/experiments/metric_ablation_olmoe_ppl_20260714_235211/plans/moe_quant_plan_tail.json"
+  },
+  "scores_csv": "/home/lwk/HeteroQuant_Repro/experiments/metric_ablation_olmoe_ppl_20260714_235211/plans/expert_distribution_scores.csv",
+  "scores_json": "/home/lwk/HeteroQuant_Repro/experiments/metric_ablation_olmoe_ppl_20260714_235211/plans/expert_distribution_scores.json",
+  "plot_paths": [
+    "/home/lwk/HeteroQuant_Repro/experiments/metric_ablation_olmoe_ppl_20260714_235211/plans/expert_score_residual_qerr_gain.png",
+    "/home/lwk/HeteroQuant_Repro/experiments/metric_ablation_olmoe_ppl_20260714_235211/plans/expert_assignment_residual_qerr_gain.png",
+    "/home/lwk/HeteroQuant_Repro/experiments/metric_ablation_olmoe_ppl_20260714_235211/plans/expert_score_residual_qerr.png",
+    "/home/lwk/HeteroQuant_Repro/experiments/metric_ablation_olmoe_ppl_20260714_235211/plans/expert_assignment_residual_qerr.png",
+    "/home/lwk/HeteroQuant_Repro/experiments/metric_ablation_olmoe_ppl_20260714_235211/plans/expert_score_kurtosis.png",
+    "/home/lwk/HeteroQuant_Repro/experiments/metric_ablation_olmoe_ppl_20260714_235211/plans/expert_assignment_kurtosis.png",
+    "/home/lwk/HeteroQuant_Repro/experiments/metric_ablation_olmoe_ppl_20260714_235211/plans/expert_score_route.png",
+    "/home/lwk/HeteroQuant_Repro/experiments/metric_ablation_olmoe_ppl_20260714_235211/plans/expert_assignment_route.png",
+    "/home/lwk/HeteroQuant_Repro/experiments/metric_ablation_olmoe_ppl_20260714_235211/plans/expert_score_tail.png",
+    "/home/lwk/HeteroQuant_Repro/experiments/metric_ablation_olmoe_ppl_20260714_235211/plans/expert_assignment_tail.png"
+  ],
+  "low_quant": {
+    "name": "w4g-1-a4g-1",
+    "abits": 4,
+    "wbits": 4,
+    "act_group_size": null,
+    "weight_group_size": null,
+    "sum_bits_cost": 8.0,
+    "cost_units": 8000
+  },
+  "high_quant": {
+    "name": "w8g-1-a8g-1",
+    "abits": 8,
+    "wbits": 8,
+    "act_group_size": null,
+    "weight_group_size": null,
+    "sum_bits_cost": 16.0,
+    "cost_units": 16000
+  },
+  "target_avg_sum_bits": 12.0,
+  "selection_scope": "per_layer",
+  "moe_outlier_topk": 64,
+  "moe_outlier_score": "smooth_scale",
+  "weight_stats_mode": "post_outlier_residual",
+  "elapsed_seconds": 102.46158692613244
+}

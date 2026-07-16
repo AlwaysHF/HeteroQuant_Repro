@@ -133,6 +133,17 @@ def _normalize_group_size(value):
     return value
 
 
+def _normalize_weight_channel_group_size(value):
+    if value is None:
+        return None
+    value = int(value)
+    if value == -1:
+        return -1
+    if value <= 1:
+        return None
+    return value
+
+
 def _resolve_moe_proj_quant_params(args, module_name: str, weight_quant_params: dict, act_quant_params: dict):
     weight_params = dict(weight_quant_params)
     act_params = dict(act_quant_params)
@@ -144,6 +155,18 @@ def _resolve_moe_proj_quant_params(args, module_name: str, weight_quant_params: 
             weight_params["group_size"] = _normalize_group_size(entry.get("weight_group_size"))
         elif "w_group_size" in entry:
             weight_params["group_size"] = _normalize_group_size(entry.get("w_group_size"))
+        if "weight_channel_group_size" in entry:
+            weight_params["weight_channel_group_size"] = _normalize_weight_channel_group_size(
+                entry.get("weight_channel_group_size")
+            )
+        elif "w_channel_group_size" in entry:
+            weight_params["weight_channel_group_size"] = _normalize_weight_channel_group_size(
+                entry.get("w_channel_group_size")
+            )
+        elif "output_channel_group_size" in entry:
+            weight_params["weight_channel_group_size"] = _normalize_weight_channel_group_size(
+                entry.get("output_channel_group_size")
+            )
         if "act_group_size" in entry:
             act_params["act_group_size"] = _normalize_group_size(entry.get("act_group_size"))
         elif "a_group_size" in entry:

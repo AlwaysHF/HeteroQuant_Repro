@@ -158,6 +158,17 @@ def normalize_group_size(value):
     return value
 
 
+def normalize_weight_channel_group_size(value):
+    if value is None:
+        return None
+    value = int(value)
+    if value == -1:
+        return -1
+    if value <= 1:
+        return None
+    return value
+
+
 def group_suffix(group_size):
     return -1 if group_size is None else int(group_size)
 
@@ -377,18 +388,77 @@ def _restore_grouped_last_dim(x, original_shape, pad):
     return x
 
 
-def quant_minmax(x, bits, reduce_dim=-1, symmetric=False, group_size=None):
+def _reshape_output_channels_to_groups(x, output_channel_group_size, input_group_size=None):
+    output_channel_group_size = normalize_weight_channel_group_size(output_channel_group_size)
+    if output_channel_group_size is None or x.ndim != 2:
+        return None, None
+
+    out_channels, in_channels = x.shape
+    output_group_size = out_channels if output_channel_group_size == -1 else min(output_channel_group_size, out_channels)
+    if output_group_size <= 1:
+        return None, None
+
+    out_pad = (output_group_size - out_channels % output_group_size) % output_group_size
+    input_group_size = normalize_group_size(input_group_size)
+    if input_group_size is not None:
+        in_pad = (input_group_size - in_channels % input_group_size) % input_group_size
+    else:
+        in_pad = 0
+    if out_pad > 0 or in_pad > 0:
+        x = F.pad(x, (0, in_pad, 0, out_pad))
+
+    padded_out, padded_in = x.shape
+    out_groups = padded_out // output_group_size
+    if input_group_size is not None:
+        input_groups = padded_in // input_group_size
+        x = x.reshape(out_groups, output_group_size, input_groups, input_group_size)
+        reduce_dim = (1, 3)
+    else:
+        x = x.reshape(out_groups, output_group_size, padded_in)
+        reduce_dim = (1, 2)
+    meta = {
+        "original_shape": (out_channels, in_channels),
+        "padded_shape": (padded_out, padded_in),
+        "out_pad": out_pad,
+        "in_pad": in_pad,
+    }
+    return x, (meta, reduce_dim)
+
+
+def _restore_grouped_output_channels(x, meta):
+    padded_out, padded_in = meta["padded_shape"]
+    x = x.reshape(padded_out, padded_in)
+    out_channels, in_channels = meta["original_shape"]
+    if meta["out_pad"] > 0:
+        x = x.narrow(0, 0, out_channels)
+    if meta["in_pad"] > 0:
+        x = x.narrow(1, 0, in_channels)
+    return x
+
+
+def quant_minmax(x, bits, reduce_dim=-1, symmetric=False, group_size=None, output_channel_group_size=None):
     if bits >= 16 or x.numel() == 0:
         return x
     dtype = x.dtype
     xf = x.detach().float()
-    if normalize_group_size(group_size) is not None:
+    grouped_output, output_group_meta = _reshape_output_channels_to_groups(
+        xf,
+        output_channel_group_size if reduce_dim in (1, -2) else None,
+        group_size,
+    )
+    if grouped_output is not None:
+        xf = grouped_output
+        original_shape, pad = None, 0
+        output_restore_meta, reduce_dim = output_group_meta
+    elif normalize_group_size(group_size) is not None:
         if reduce_dim not in (-1, xf.ndim - 1, 1):
             raise ValueError(f"group quant only supports last/input dim, got reduce_dim={reduce_dim}")
         xf, original_shape, pad = _reshape_last_dim_to_groups(xf, group_size)
         reduce_dim = -1
+        output_restore_meta = None
     else:
         original_shape, pad = None, 0
+        output_restore_meta = None
     if symmetric:
         qmin = -(2 ** (bits - 1))
         qmax = 2 ** (bits - 1) - 1
@@ -396,6 +466,8 @@ def quant_minmax(x, bits, reduce_dim=-1, symmetric=False, group_size=None):
         scale = xmax / max(qmax, 1)
         q = torch.round(xf / scale).clamp(qmin, qmax)
         out = q * scale
+        if output_restore_meta is not None:
+            return _restore_grouped_output_channels(out, output_restore_meta).to(dtype)
         return _restore_grouped_last_dim(out, original_shape, pad).to(dtype)
     qmin = 0
     qmax = 2 ** bits - 1
@@ -405,6 +477,8 @@ def quant_minmax(x, bits, reduce_dim=-1, symmetric=False, group_size=None):
     zero = torch.round(qmin - xmin / scale).clamp(qmin, qmax)
     q = (torch.round(xf / scale) + zero).clamp(qmin, qmax)
     out = (q - zero) * scale
+    if output_restore_meta is not None:
+        return _restore_grouped_output_channels(out, output_restore_meta).to(dtype)
     return _restore_grouped_last_dim(out, original_shape, pad).to(dtype)
 
 
@@ -591,9 +665,23 @@ def run_projection_error_analysis(model, dataloader, selected_modules, candidate
                 return mod.weight
             cache_key = ("weight", id(mod), candidate.name)
             if args.weight_cache == "none":
-                return quant_minmax(mod.weight, candidate.wbits, reduce_dim=1, symmetric=args.symmetric, group_size=candidate.weight_group_size)
+                return quant_minmax(
+                    mod.weight,
+                    candidate.wbits,
+                    reduce_dim=1,
+                    symmetric=args.symmetric,
+                    group_size=candidate.weight_group_size,
+                    output_channel_group_size=args.weight_channel_group_size,
+                )
             if cache_key not in weight_cache:
-                wq_tmp = quant_minmax(mod.weight, candidate.wbits, reduce_dim=1, symmetric=args.symmetric, group_size=candidate.weight_group_size).detach()
+                wq_tmp = quant_minmax(
+                    mod.weight,
+                    candidate.wbits,
+                    reduce_dim=1,
+                    symmetric=args.symmetric,
+                    group_size=candidate.weight_group_size,
+                    output_channel_group_size=args.weight_channel_group_size,
+                ).detach()
                 if args.weight_cache == "cpu":
                     wq_tmp = wq_tmp.cpu()
                 weight_cache[cache_key] = wq_tmp
@@ -627,7 +715,14 @@ def run_projection_error_analysis(model, dataloader, selected_modules, candidate
                     idx = idx.to(device=x.device)
                     main_weight = main_weight.to(device=x.device, dtype=x.dtype, non_blocking=True)
                     outlier_weight = outlier_weight.to(device=x.device, dtype=x.dtype, non_blocking=True)
-                    main_wq = quant_minmax(main_weight, candidate.wbits, reduce_dim=1, symmetric=args.symmetric, group_size=candidate.weight_group_size)
+                    main_wq = quant_minmax(
+                        main_weight,
+                        candidate.wbits,
+                        reduce_dim=1,
+                        symmetric=args.symmetric,
+                        group_size=candidate.weight_group_size,
+                        output_channel_group_size=args.weight_channel_group_size,
+                    )
                     qout = F.linear(xq, main_wq, mod.bias)
 
                     outlier_abits, outlier_wbits = resolve_outlier_bits(args.moe_outlier_quant, candidate)
@@ -691,9 +786,23 @@ def run_expert_output_error_analysis(model, dataloader, selected_experts, select
                 return mod.weight
             cache_key = ("weight", id(mod), candidate.name)
             if args.weight_cache == "none":
-                return quant_minmax(mod.weight, candidate.wbits, reduce_dim=1, symmetric=args.symmetric, group_size=candidate.weight_group_size)
+                return quant_minmax(
+                    mod.weight,
+                    candidate.wbits,
+                    reduce_dim=1,
+                    symmetric=args.symmetric,
+                    group_size=candidate.weight_group_size,
+                    output_channel_group_size=args.weight_channel_group_size,
+                )
             if cache_key not in weight_cache:
-                wq_tmp = quant_minmax(mod.weight, candidate.wbits, reduce_dim=1, symmetric=args.symmetric, group_size=candidate.weight_group_size).detach()
+                wq_tmp = quant_minmax(
+                    mod.weight,
+                    candidate.wbits,
+                    reduce_dim=1,
+                    symmetric=args.symmetric,
+                    group_size=candidate.weight_group_size,
+                    output_channel_group_size=args.weight_channel_group_size,
+                ).detach()
                 if args.weight_cache == "cpu":
                     wq_tmp = wq_tmp.cpu()
                 weight_cache[cache_key] = wq_tmp
@@ -724,7 +833,14 @@ def run_expert_output_error_analysis(model, dataloader, selected_experts, select
                 idx = idx.to(device=x.device)
                 main_weight = main_weight.to(device=x.device, dtype=x.dtype, non_blocking=True)
                 outlier_weight = outlier_weight.to(device=x.device, dtype=x.dtype, non_blocking=True)
-                main_wq = quant_minmax(main_weight, candidate.wbits, reduce_dim=1, symmetric=args.symmetric, group_size=candidate.weight_group_size)
+                main_wq = quant_minmax(
+                    main_weight,
+                    candidate.wbits,
+                    reduce_dim=1,
+                    symmetric=args.symmetric,
+                    group_size=candidate.weight_group_size,
+                    output_channel_group_size=args.weight_channel_group_size,
+                )
                 out = F.linear(xq, main_wq, mod.bias)
 
                 outlier_abits, outlier_wbits = resolve_outlier_bits(args.moe_outlier_quant, candidate)
@@ -1018,6 +1134,7 @@ def summarize_plan(plan, args, total_objective, dp_objective):
         "target_equivalent_avg_aw_bits": float(args.target_avg_sum_bits) / 2.0,
         "actual_equivalent_avg_aw_bits": float(avg_sum_bits) / 2.0,
         "objective_metric": args.objective_metric,
+        "weight_channel_group_size": args.weight_channel_group_size,
         "total_objective": float(total_objective),
         "dp_objective": float(dp_objective),
         "quantization_counts": dict(quant_counts),
@@ -1104,6 +1221,12 @@ def main():
     parser.add_argument("--experts", default=None, help="comma separated expert ids; default all")
     parser.add_argument("--projs", default="gate_proj,up_proj,down_proj")
     parser.add_argument("--symmetric", action="store_true")
+    parser.add_argument(
+        "--weight_channel_group_size",
+        type=int,
+        default=None,
+        help="output-channel group size for weight error simulation; -1 means one tensor scale per matrix",
+    )
     parser.add_argument("--smooth", action="store_true")
     parser.add_argument("--fc1_scale_merge", default="act_mean")
     parser.add_argument("--act_mean_beta", type=float, default=2.0)
