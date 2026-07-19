@@ -1,0 +1,4 @@
+model,scope,group_size,base_qparam_groups,virtual_repeats,total_qparam_groups,latency_ms,latency_q20_ms,latency_q80_ms,latency_std_ms,qbits,block_size,qparam_group_reduction_vs_group1,operator_speedup_vs_group1
+olmoe,all_experts,1,4194304,1,4194304,0.157222,0.156467,0.157978,0.001068,4,256,1.000000,1.000000
+olmoe,all_experts,16,262144,1,262144,0.160392,0.159414,0.161370,0.001383,4,256,16.000000,0.980236
+olmoe,all_experts,2048,3072,1,3072,0.154426,0.153510,0.155341,0.001294,4,256,1365.333333,1.018106

@@ -1,0 +1,41 @@
+{
+  "format": "duquant_olmoe_expert_distribution_planner_v1",
+  "model": "/home/lwk/HeteroQuant_Repro/local_models/olmoe_compat",
+  "output_dir": "/home/lwk/HeteroQuant_Repro/experiments/aw_budget_sweep_routed_tail_olmoe_group2048_20260718_082538/aw13/plans",
+  "metrics": [
+    "routed_tail"
+  ],
+  "plan_paths": {
+    "routed_tail": "/home/lwk/HeteroQuant_Repro/experiments/aw_budget_sweep_routed_tail_olmoe_group2048_20260718_082538/aw13/plans/moe_quant_plan_routed_tail.json"
+  },
+  "scores_csv": "/home/lwk/HeteroQuant_Repro/experiments/aw_budget_sweep_routed_tail_olmoe_group2048_20260718_082538/aw13/plans/expert_distribution_scores.csv",
+  "scores_json": "/home/lwk/HeteroQuant_Repro/experiments/aw_budget_sweep_routed_tail_olmoe_group2048_20260718_082538/aw13/plans/expert_distribution_scores.json",
+  "plot_paths": [
+    "/home/lwk/HeteroQuant_Repro/experiments/aw_budget_sweep_routed_tail_olmoe_group2048_20260718_082538/aw13/plans/expert_score_routed_tail.png",
+    "/home/lwk/HeteroQuant_Repro/experiments/aw_budget_sweep_routed_tail_olmoe_group2048_20260718_082538/aw13/plans/expert_assignment_routed_tail.png"
+  ],
+  "low_quant": {
+    "name": "w4g-1-a4g-1",
+    "abits": 4,
+    "wbits": 4,
+    "act_group_size": null,
+    "weight_group_size": null,
+    "sum_bits_cost": 8.0,
+    "cost_units": 8000
+  },
+  "high_quant": {
+    "name": "w8g-1-a8g-1",
+    "abits": 8,
+    "wbits": 8,
+    "act_group_size": null,
+    "weight_group_size": null,
+    "sum_bits_cost": 16.0,
+    "cost_units": 16000
+  },
+  "target_avg_sum_bits": 13.0,
+  "selection_scope": "per_layer",
+  "moe_outlier_topk": 64,
+  "moe_outlier_score": "smooth_scale",
+  "weight_stats_mode": "post_outlier_residual",
+  "elapsed_seconds": 95.59483474865556
+}

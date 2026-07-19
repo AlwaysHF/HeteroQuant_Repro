@@ -182,9 +182,19 @@ class MoeOutlierExpertBank(nn.Module):
         self.outlier_output_features = gate_modules[0].out_features if gate_modules else 0
         self.quant_mode, self.weight_bits, self.act_bits = _resolve_outlier_quant_mode(args)
         self.symmetric = getattr(args, "symmetric", False)
+        self.act_dynamic_method = getattr(args, "a_dynamic_method", "per_token")
+        self.act_static_calibrated = False
         self.use_weight_quant = False
         self.use_act_quant = False
         self.weight_quantized = False
+        self.register_buffer("gate_act_static_xmin", None, persistent=False)
+        self.register_buffer("gate_act_static_xmax", None, persistent=False)
+        self.register_buffer("gate_act_static_scale", None, persistent=True)
+        self.register_buffer("gate_act_static_zero", None, persistent=True)
+        self.register_buffer("up_act_static_xmin", None, persistent=False)
+        self.register_buffer("up_act_static_xmax", None, persistent=False)
+        self.register_buffer("up_act_static_scale", None, persistent=True)
+        self.register_buffer("up_act_static_zero", None, persistent=True)
 
         gate_weight = torch.cat([module.weight.detach().clone() for module in gate_modules], dim=0)
         up_weight = torch.cat([module.weight.detach().clone() for module in up_modules], dim=0)
@@ -193,30 +203,93 @@ class MoeOutlierExpertBank(nn.Module):
         self.register_buffer("gate_indices", torch.stack(gate_indices, dim=0).long(), persistent=True)
         self.register_buffer("up_indices", torch.stack(up_indices, dim=0).long(), persistent=True)
 
-    def _fake_quant(self, x, n_bits, dim, symmetric=False):
-        if self.quant_mode == "fp16" or n_bits >= 16:
-            return x
+    def _apply_fake_quant_qparams(self, x, n_bits, scale, zero=None, symmetric=False):
         dtype = x.dtype
         x_float = x.float()
         if symmetric:
             qmin = -(2 ** (n_bits - 1))
             qmax = 2 ** (n_bits - 1) - 1
-            scale = x_float.abs().amax(dim=dim, keepdim=True).clamp(min=1e-5) / max(qmax, 1)
             x_int = torch.round(x_float / scale).clamp(qmin, qmax)
             return (x_int * scale).to(dtype)
         qmin = 0
         qmax = 2 ** n_bits - 1
-        xmin = x_float.amin(dim=dim, keepdim=True)
-        xmax = x_float.amax(dim=dim, keepdim=True)
-        scale = (xmax - xmin).clamp(min=1e-5) / max(qmax - qmin, 1)
-        zero = torch.round(qmin - xmin / scale).clamp(qmin, qmax)
         x_int = (torch.round(x_float / scale) + zero).clamp(qmin, qmax)
         return ((x_int - zero) * scale).to(dtype)
+
+    def _fake_quant(self, x, n_bits, dim, symmetric=False):
+        if self.quant_mode == "fp16" or n_bits >= 16:
+            return x
+        x_float = x.float()
+        if symmetric:
+            qmin = -(2 ** (n_bits - 1))
+            qmax = 2 ** (n_bits - 1) - 1
+            if dim is None:
+                scale = x_float.abs().amax().clamp(min=1e-5) / max(qmax, 1)
+            else:
+                scale = x_float.abs().amax(dim=dim, keepdim=True).clamp(min=1e-5) / max(qmax, 1)
+            return self._apply_fake_quant_qparams(x, n_bits, scale, symmetric=True)
+        qmin = 0
+        qmax = 2 ** n_bits - 1
+        if dim is None:
+            xmin = x_float.amin()
+            xmax = x_float.amax()
+        else:
+            xmin = x_float.amin(dim=dim, keepdim=True)
+            xmax = x_float.amax(dim=dim, keepdim=True)
+        scale = (xmax - xmin).clamp(min=1e-5) / max(qmax - qmin, 1)
+        zero = torch.round(qmin - xmin / scale).clamp(qmin, qmax)
+        return self._apply_fake_quant_qparams(x, n_bits, scale, zero, symmetric=False)
 
     def _quantize_weight(self, weight):
         return self._fake_quant(weight, self.weight_bits, dim=1, symmetric=self.symmetric)
 
-    def _quantize_input(self, x):
+    def _update_static_input_bounds(self, branch, x):
+        xmin_name = f"{branch}_act_static_xmin"
+        xmax_name = f"{branch}_act_static_xmax"
+        xmin = x.detach().float().amin()
+        xmax = x.detach().float().amax()
+        old_xmin = getattr(self, xmin_name)
+        old_xmax = getattr(self, xmax_name)
+        if old_xmin is None:
+            setattr(self, xmin_name, xmin)
+            setattr(self, xmax_name, xmax)
+        else:
+            setattr(self, xmin_name, torch.minimum(old_xmin.to(xmin.device), xmin))
+            setattr(self, xmax_name, torch.maximum(old_xmax.to(xmax.device), xmax))
+
+    def _finalize_static_input_quant(self):
+        if self.act_dynamic_method not in ("static_per_tensor", "per_tensor_static") or self.act_static_calibrated:
+            return
+        qmin = 0
+        qmax = 2 ** self.act_bits - 1
+        for branch in ("gate", "up"):
+            xmin = getattr(self, f"{branch}_act_static_xmin")
+            xmax = getattr(self, f"{branch}_act_static_xmax")
+            if xmin is None or xmax is None:
+                continue
+            scale = (xmax - xmin).clamp(min=1e-5) / max(qmax - qmin, 1)
+            zero = torch.round(qmin - xmin / scale).clamp(qmin, qmax)
+            setattr(self, f"{branch}_act_static_scale", scale.detach())
+            setattr(self, f"{branch}_act_static_zero", zero.detach())
+        self.act_static_calibrated = True
+
+    def _quantize_input(self, x, branch):
+        if self.act_dynamic_method in ("per_tensor", "per_tensor_dynamic"):
+            return self._fake_quant(x, self.act_bits, dim=None, symmetric=False)
+        if self.act_dynamic_method in ("static_per_tensor", "per_tensor_static"):
+            scale = getattr(self, f"{branch}_act_static_scale")
+            zero = getattr(self, f"{branch}_act_static_zero")
+            if (
+                not self.act_static_calibrated
+                and scale is not None
+                and zero is not None
+                and getattr(self, f"{branch}_act_static_xmin") is None
+            ):
+                self.act_static_calibrated = True
+            if self.act_static_calibrated and scale is not None and zero is not None:
+                return self._apply_fake_quant_qparams(x, self.act_bits, scale.to(x.device), zero.to(x.device), symmetric=False)
+            self._update_static_input_bounds(branch, x)
+            return self._fake_quant(x, self.act_bits, dim=None, symmetric=False)
         return self._fake_quant(x, self.act_bits, dim=-1, symmetric=False)
 
     def set_quant_state(self, weight_quant=False, act_quant=False):
@@ -225,6 +298,7 @@ class MoeOutlierExpertBank(nn.Module):
 
     @torch.no_grad()
     def quantize_weight_inplace(self):
+        self._finalize_static_input_quant()
         if self.quant_mode == "fp16" or self.weight_bits >= 16 or self.weight_quantized:
             return
         self.gate_weight.copy_(self._quantize_weight(self.gate_weight))
@@ -250,8 +324,8 @@ class MoeOutlierExpertBank(nn.Module):
             gate_weight = self._quantize_weight(gate_weight)
             up_weight = self._quantize_weight(up_weight)
         if self.use_act_quant:
-            gate_x = self._quantize_input(gate_x)
-            up_x = self._quantize_input(up_x)
+            gate_x = self._quantize_input(gate_x, "gate")
+            up_x = self._quantize_input(up_x, "up")
 
         gate_outlier = F.linear(gate_x, gate_weight, None)
         up_outlier = F.linear(up_x, up_weight, None)
@@ -727,6 +801,9 @@ class QuantQwen2MoeDecoderLayer(nn.Module):
             if isinstance(module, QuantLinear):
                 module.weight_quantizer.register_duquant_params(scale_zp = True)
                 module.act_quantizer.register_duquant_params(scale_zp = False)
+            elif isinstance(module, QuantMatMul):
+                module.x1_quantizer.register_duquant_params(scale_zp=False)
+                module.x2_quantizer.register_duquant_params(scale_zp=False)
     
     def load_duquant_params(self, state_dict, device):
         for k, v in state_dict.items():

@@ -112,6 +112,9 @@ class UniformAffineQuantizer(nn.Module):
 
         self.scales = None
         self.zeros = None
+        self.register_buffer("static_xmin", None, persistent=False)
+        self.register_buffer("static_xmax", None, persistent=False)
+        self.static_calibrated = False
 
         self.cached_xmin = None
         self.cached_xmax = None
@@ -157,6 +160,38 @@ class UniformAffineQuantizer(nn.Module):
 
     def _active_group_size(self):
         return self.group_size if self.is_weight else self.act_group_size
+
+    def _is_per_tensor_dynamic(self):
+        return self.dynamic_method in ("per_tensor", "per_tensor_dynamic")
+
+    def _is_static_per_tensor(self):
+        return self.dynamic_method in ("static_per_tensor", "per_tensor_static")
+
+    def _is_activation_dynamic_method(self):
+        return self.dynamic_method == "per_token" or self._is_per_tensor_dynamic() or self._is_static_per_tensor()
+
+    def _register_or_set_buffer(self, name, value, persistent=True):
+        if value is not None:
+            value = value.detach()
+        if name in self._buffers:
+            self._buffers[name] = value
+        else:
+            if hasattr(self, name):
+                delattr(self, name)
+            self.register_buffer(name, value, persistent=persistent)
+
+    def _calculate_qparams_from_minmax(self, xmin, xmax):
+        if self.symmetric:
+            abs_max = torch.max(xmax.abs(), xmin.abs())
+            scale = abs_max / (2 ** (self.n_bits - 1) - 1)
+            scale = scale.clamp(min=CLIPMIN, max=CLIPMAX)
+            zero_point = (2 ** (self.n_bits - 1) - 1) * torch.ones_like(scale)
+        else:
+            scale = (xmax - xmin) / (2 ** self.n_bits - 1)
+            scale = scale.clamp(min=CLIPMIN, max=CLIPMAX)
+            zero_point = -(xmin) / scale
+        zero_point = zero_point.clamp(min=-CLIPMAX, max=CLIPMAX).round()
+        return scale, zero_point
 
     def _effective_weight_channel_group_size(self, x):
         if not self.is_weight or self.weight_channel_group_size is None or x.ndim != 2:
@@ -512,7 +547,7 @@ class UniformAffineQuantizer(nn.Module):
     def forward(self, x: torch.Tensor, act=None, return_no_quant=False):
         if x.numel() == 0:
             return x
-        if self.dynamic_method == "per_token" or "per_channel" in self.dynamic_method:
+        if self._is_activation_dynamic_method() or "per_channel" in self.dynamic_method:
             x = self.init_duquant(x)
         
         if self.recorded_x_max is None:
@@ -525,6 +560,10 @@ class UniformAffineQuantizer(nn.Module):
 
         if self.dynamic_method == "per_token": # act
             self.per_token_dynamic_calibration(x)
+        elif self._is_per_tensor_dynamic(): # act
+            self.per_tensor_dynamic_calibration(x)
+        elif self._is_static_per_tensor(): # act
+            self.static_per_tensor_calibration(x)
         else: # weight
             if self.do_calibration:
                 if self.dynamic_method == "per_channel": # weight, router_w
@@ -668,6 +707,51 @@ class UniformAffineQuantizer(nn.Module):
 
 
 
+    def per_tensor_dynamic_calibration(self, x):
+        xmin = x.amin().to(x.device)
+        xmax = x.amax().to(x.device)
+        self.scales, self.zeros = self._calculate_qparams_from_minmax(xmin, xmax)
+
+    def _update_static_per_tensor_bounds(self, x):
+        xmin = x.detach().amin()
+        xmax = x.detach().amax()
+        if self.static_xmin is None:
+            self.static_xmin = xmin
+            self.static_xmax = xmax
+        else:
+            self.static_xmin = torch.minimum(self.static_xmin.to(xmin.device), xmin)
+            self.static_xmax = torch.maximum(self.static_xmax.to(xmax.device), xmax)
+
+    def finalize_static_per_tensor_calibration(self):
+        if not self._is_static_per_tensor():
+            return
+        if self.static_calibrated:
+            return
+        if self.static_xmin is None or self.static_xmax is None:
+            if self.scales is None or self.zeros is None:
+                raise RuntimeError(
+                    f"{self.model_name}: static_per_tensor activation quantizer "
+                    "has no collected calibration range"
+                )
+            self.static_calibrated = True
+            return
+        self.scales, self.zeros = self._calculate_qparams_from_minmax(self.static_xmin, self.static_xmax)
+        self.static_calibrated = True
+
+    def static_per_tensor_calibration(self, x):
+        if (
+            not self.static_calibrated
+            and self.scales is not None
+            and self.zeros is not None
+            and self.static_xmin is None
+            and self.static_xmax is None
+        ):
+            self.static_calibrated = True
+        if self.static_calibrated and self.scales is not None and self.zeros is not None:
+            return
+        self._update_static_per_tensor_bounds(x)
+        self.per_tensor_dynamic_calibration(x)
+
     def per_token_dynamic_calibration(self, x):
         x, meta = self._reshape_for_quant(x)
         reduce_shape = self._quant_reduce_dims(meta)
@@ -680,27 +764,19 @@ class UniformAffineQuantizer(nn.Module):
             xmax = self.lac*xmax
             xmin = self.lac*xmin
 
-        if self.symmetric:
-            abs_max = torch.max(xmax.abs(),xmin.abs())
-            scale = abs_max / (2**(self.n_bits-1)-1)
-            self.scales = scale.clamp(min=CLIPMIN, max=CLIPMAX)
-            zero_point = (2**(self.n_bits-1)-1)*torch.ones_like(self.scales)
-        else:
-            scale = (xmax - xmin) / (2**self.n_bits-1)
-            self.scales = scale.clamp(min=CLIPMIN, max=CLIPMAX)
-            zero_point = -(xmin) / (self.scales)
-        self.zeros = zero_point.clamp(min=-CLIPMAX, max=CLIPMAX).round()
+        self.scales, self.zeros = self._calculate_qparams_from_minmax(xmin, xmax)
         
         
     def register_duquant_params(self, scale_zp = True):
-        if scale_zp:
-            scales, zeros = self.scales, self.zeros
-            delattr(self, 'scales')
-            delattr(self, 'zeros')
-            self.register_buffer('scales', scales)
-            self.register_buffer('zeros', zeros)
+        if self._is_static_per_tensor():
+            self.finalize_static_per_tensor_calibration()
 
-        if self.rotate is not True:
+        if scale_zp or self._is_static_per_tensor():
+            if self.scales is not None and self.zeros is not None:
+                self._register_or_set_buffer('scales', self.scales)
+                self._register_or_set_buffer('zeros', self.zeros)
+
+        if self.rotate is not True or not hasattr(self, "permutation_list") or not hasattr(self, "R"):
             return
         permutation_list, R = self.permutation_list, self.R
         delattr(self, 'R')

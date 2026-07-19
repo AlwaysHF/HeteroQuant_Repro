@@ -1,0 +1,4 @@
+group_size,mean_operator_speedup_vs_group1,mean_qparam_group_reduction_vs_group1,num_cases
+1,1.000000,1.000000,1
+16,0.980236,16.000000,1
+2048,1.018106,1365.333333,1

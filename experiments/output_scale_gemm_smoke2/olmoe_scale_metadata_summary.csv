@@ -1,0 +1,7 @@
+granularity,channels_per_scale,scale_count_per_expert,scale_reduction_vs_per_channel,fp16_scale_bytes_per_expert
+per_channel,1,4096,1.000000,8192
+2_channels,2,2048,2.000000,4096
+4_channels,4,1024,4.000000,2048
+8_channels,8,512,8.000000,1024
+16_channels,16,256,16.000000,512
+per_tensor,per_tensor,3,1365.333333,6
