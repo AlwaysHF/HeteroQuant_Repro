@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from models.olmoe.modeling_olmoe import OlmoeDecoderLayer
 from models.pangu_moe.modeling_pangu_moe import PanguProMoEDecoderLayer
@@ -83,6 +84,129 @@ def get_scale(fcs, act_scales, alpha=0.5):
     weight_scales = weight_scales.max(dim=0)[0].clamp(min=1e-5)
     scales = (act_scales.pow(alpha) / weight_scales.pow(1-alpha)).clamp(min=1e-5)
     return scales
+
+
+def merge_scale(sm_scales_list, act_samples_list, weight_scores_list=None, router_logits=None, expert_num_list=[64,8,0], fc1_scale_merge="max"):
+    """EAQuant expert-aware aggregation for MoE fc1 smooth scales."""
+    expert_num, select_expert_num, share_expert_num = expert_num_list
+
+    sm_scales_list = list(sm_scales_list)
+    act_samples_list = list(act_samples_list)
+    weight_scores_list = list(weight_scores_list or [0.0] * len(sm_scales_list))
+
+    act_samples_total = act_samples_list[0] # gate
+
+    ### 1. act_samples
+    del act_samples_list[0] # gate
+    if share_expert_num > 0:
+        del act_samples_list[-1] # shared_expert, shared_experts
+    for j in range(expert_num): # experts
+        act_samples_list[j] = torch.tensor([act_samples_list[j]/(act_samples_total * select_expert_num)])
+    act_samples_ratio = torch.stack(act_samples_list, dim=0)
+
+    ### 2. weight_scores
+    del weight_scores_list[0] # gate
+    if share_expert_num > 0:
+        del weight_scores_list[-1] # shared_expert, shared_experts
+    weight_scores_list = [torch.tensor([x]) for x in weight_scores_list]
+    if "sum2_0" in fc1_scale_merge:
+        weight_scores_list = torch.stack(weight_scores_list, dim=0).sqrt()
+        weight_scores_ratio = F.softmax(weight_scores_list, dim=0, dtype=torch.float)
+    elif "sum2_1" in fc1_scale_merge:
+        weight_scores_list = torch.stack(weight_scores_list, dim=0)
+        weight_scores_ratio = F.softmax(weight_scores_list, dim=0, dtype=torch.float)
+    elif "sum2_2" in fc1_scale_merge:
+        weight_scores_list = torch.stack(weight_scores_list, dim=0).sqrt()
+        weight_scores_ratio = weight_scores_list / weight_scores_list.sum()
+    elif "sum2_3" in fc1_scale_merge:
+        weight_scores_list = torch.stack(weight_scores_list, dim=0)
+        weight_scores_ratio = weight_scores_list / weight_scores_list.sum()
+    else:
+        weight_scores_ratio = torch.stack(weight_scores_list, dim=0) * 0.0
+
+    if "_gate" in fc1_scale_merge:
+        sm_scales_gate = sm_scales_list[0]
+    else:
+        sm_scales_gate = sm_scales_list[0] * 0.0
+    del sm_scales_list[0] # gate
+    if share_expert_num > 0:
+        sm_scales_share_expert = sm_scales_list[-1]
+        del sm_scales_list[-1] # shared_expert, shared_experts
+        sm_scales_gate = torch.max(sm_scales_gate, sm_scales_share_expert)
+    sm_scales_expert = torch.stack(sm_scales_list, dim=0)
+    fc1_smooth_ratio1 = act_samples_ratio.view(-1,1).to(sm_scales_expert.device).to(sm_scales_expert.dtype)    # expert frequency
+    fc1_smooth_ratio2 = weight_scores_ratio.view(-1,1).to(sm_scales_expert.device).to(sm_scales_expert.dtype) # weight distribution
+    if router_logits is None:
+        router_logits = torch.zeros(expert_num, device=sm_scales_expert.device, dtype=sm_scales_expert.dtype)
+    fc1_smooth_ratio3 = router_logits.view(-1,1).to(sm_scales_expert.device).to(sm_scales_expert.dtype)       # router distribution
+
+    if "max" in fc1_scale_merge:
+        merge_fc1_smooth_scale = torch.max(torch.max(sm_scales_expert, dim=0).values, sm_scales_gate)
+    elif "sum1" in fc1_scale_merge:
+        merge_fc1_smooth_scale = torch.max(torch.sum(sm_scales_expert*fc1_smooth_ratio1, dim=0), sm_scales_gate)
+    elif "sum2" in fc1_scale_merge:
+        merge_fc1_smooth_scale = torch.max(torch.sum(sm_scales_expert*fc1_smooth_ratio2, dim=0), sm_scales_gate)
+    elif "sum3" in fc1_scale_merge:
+        merge_fc1_smooth_scale = torch.max(torch.sum(sm_scales_expert*fc1_smooth_ratio3, dim=0), sm_scales_gate)
+
+    elif "all" in fc1_scale_merge:
+        merge_fc1_smooth_scale0 = torch.max(torch.max(sm_scales_expert, dim=0).values, sm_scales_gate)
+        merge_fc1_smooth_scale1 = torch.max(torch.sum(sm_scales_expert*fc1_smooth_ratio1, dim=0), sm_scales_gate)
+        merge_fc1_smooth_scale2 = torch.max(torch.sum(sm_scales_expert*fc1_smooth_ratio2, dim=0), sm_scales_gate)
+        merge_fc1_smooth_scale3 = torch.max(torch.sum(sm_scales_expert*fc1_smooth_ratio3, dim=0), sm_scales_gate)
+        merge_fc1_smooth_scale = torch.max(torch.max(torch.max(merge_fc1_smooth_scale0, merge_fc1_smooth_scale1), merge_fc1_smooth_scale2), merge_fc1_smooth_scale3)
+    else:
+        raise ValueError(f"unsupported EAQuant fc1_scale_merge={fc1_scale_merge!r}")
+
+    return merge_fc1_smooth_scale
+
+
+def _require_stat(mapping, key, stat_name):
+    if mapping is None or key not in mapping:
+        raise KeyError(f"missing {stat_name} for {key}")
+    return mapping[key]
+
+
+@torch.no_grad()
+def _build_eaquant_fc1_smooth_scale(
+    *,
+    fc1_split,
+    sp_name_list,
+    scales,
+    act_samples,
+    weight_scores,
+    router_logits,
+    layer_gate_name,
+    expert_num,
+    select_expert_num,
+    share_expert_num,
+    fc1_scale_merge,
+    alpha,
+    logger,
+):
+    sm_scales_list = []
+    act_samples_list = []
+    weight_scores_list = []
+    for sp_name, fcs in zip(sp_name_list, fc1_split):
+        logger.info(f"[smooth_lm] sp_name: {sp_name}")
+        sm_scales = get_scale(fcs, _require_stat(scales, sp_name, "act_scales"), alpha)
+        logger.info("original scale={},max={},min={},scale.shape: {}".format(sm_scales, sm_scales.max(), sm_scales.min(), sm_scales.shape))
+        sm_scales_list.append(sm_scales)
+        act_samples_list.append(_require_stat(act_samples, sp_name, "act_samples"))
+        weight_scores_list.append(_require_stat(weight_scores, sp_name, "weight_scores"))
+    logger.info(f"len(sm_scales_list): {len(sm_scales_list)}")
+    logger.info(f"len(act_samples_list): {len(act_samples_list)}")
+    logger.info(f"len(weight_scores_list): {len(weight_scores_list)}")
+    sm_scales = merge_scale(
+        sm_scales_list,
+        act_samples_list,
+        weight_scores_list,
+        _require_stat(router_logits, layer_gate_name, "router_logits"),
+        expert_num_list=[expert_num, select_expert_num, share_expert_num],
+        fc1_scale_merge=fc1_scale_merge,
+    )
+    logger.info("scale={},max={},min={},scale.shape: {}".format(sm_scales, sm_scales.max(), sm_scales.min(), sm_scales.shape))
+    return sm_scales
 
 
 
@@ -189,11 +313,14 @@ def smooth_lm(
     moe_fc1_smooth_scales=None,
     logger=None,
 ):
-    if fc1_scale_merge not in ("act_mean", "act_p99"):
+    if fc1_scale_merge not in ("act_mean", "act_p99", "max"):
         raise ValueError(
             f"unsupported fc1_scale_merge={fc1_scale_merge!r}; "
-            "current MoE fc1 smoothing expects prebuilt act_mean/act_p99 scales"
+            "current MoE fc1 smoothing expects act_mean, act_p99, or EAQuant max"
         )
+    use_eaquant_merge = fc1_scale_merge == "max"
+    if use_eaquant_merge and moe_fc1_smooth_scales is None:
+        moe_fc1_smooth_scales = {}
 
     for name, module in model.named_modules():
         if isinstance(module, (OlmoeDecoderLayer)):
@@ -229,10 +356,31 @@ def smooth_lm(
             ffn_ln = module.post_attention_layernorm
             fc1 = [module.mlp.gate] + [module.mlp.experts[i].gate_proj for i in range(expert_num)] + [module.mlp.experts[i].up_proj for i in range(expert_num)]
             sp_name = name + '.mlp.gate'
-            logger.info(f"[smooth_lm] sp_name: {sp_name}")
-            logger.info(f"use prebuilt MoE fc1 smooth scale from {fc1_scale_merge}")
-            sm_scales = _get_moe_fc1_smooth_scale(moe_fc1_smooth_scales, sp_name, module.mlp.gate)
-            logger.info("scale={},max={},min={},scale.shape: {}".format(sm_scales,sm_scales.max(), sm_scales.min(), sm_scales.shape))
+            if use_eaquant_merge:
+                fc1_split = [module.mlp.gate] + [[module.mlp.experts[i].gate_proj, module.mlp.experts[i].up_proj] for i in range(expert_num)]
+                sp_name_list = [sp_name] + [name + f'.mlp.experts.{i}.up_proj' for i in range(expert_num)]
+                logger.info("use EAQuant merge_scale for MoE fc1 smooth scale")
+                sm_scales = _build_eaquant_fc1_smooth_scale(
+                    fc1_split=fc1_split,
+                    sp_name_list=sp_name_list,
+                    scales=scales,
+                    act_samples=act_samples,
+                    weight_scores=weight_scores,
+                    router_logits=router_logits,
+                    layer_gate_name=sp_name,
+                    expert_num=expert_num,
+                    select_expert_num=select_expert_num,
+                    share_expert_num=share_expert_num,
+                    fc1_scale_merge=fc1_scale_merge,
+                    alpha=alpha,
+                    logger=logger,
+                )
+                moe_fc1_smooth_scales[sp_name] = sm_scales.detach().cpu()
+            else:
+                logger.info(f"[smooth_lm] sp_name: {sp_name}")
+                logger.info(f"use prebuilt MoE fc1 smooth scale from {fc1_scale_merge}")
+                sm_scales = _get_moe_fc1_smooth_scale(moe_fc1_smooth_scales, sp_name, module.mlp.gate)
+                logger.info("scale={},max={},min={},scale.shape: {}".format(sm_scales,sm_scales.max(), sm_scales.min(), sm_scales.shape))
             smooth_ln_fcs(ffn_ln, fc1, sm_scales)
 
             for i in range(expert_num):
@@ -280,10 +428,35 @@ def smooth_lm(
             fc1 += [module.mlp.experts[i].up_proj for i in range(expert_num)]
             fc1 += [module.mlp.shared_expert.gate_proj, module.mlp.shared_expert.up_proj]
             sp_name = name + '.mlp.gate'
-            logger.info(f"[smooth_lm] sp_name: {sp_name}")
-            logger.info(f"use prebuilt MoE fc1 smooth scale from {fc1_scale_merge}")
-            sm_scales = _get_moe_fc1_smooth_scale(moe_fc1_smooth_scales, sp_name, module.mlp.gate)
-            logger.info("scale={},max={},min={},scale.shape: {}".format(sm_scales, sm_scales.max(), sm_scales.min(), sm_scales.shape))
+            if use_eaquant_merge:
+                fc1_split = [module.mlp.gate]
+                fc1_split += [[module.mlp.experts[i].gate_proj, module.mlp.experts[i].up_proj] for i in range(expert_num)]
+                fc1_split += [[module.mlp.shared_expert.gate_proj, module.mlp.shared_expert.up_proj]]
+                sp_name_list = [sp_name]
+                sp_name_list += [name + f'.mlp.experts.{i}.up_proj' for i in range(expert_num)]
+                sp_name_list += [name + '.mlp.shared_expert.up_proj']
+                logger.info("use EAQuant merge_scale for qwen2_moe fc1 smooth scale")
+                sm_scales = _build_eaquant_fc1_smooth_scale(
+                    fc1_split=fc1_split,
+                    sp_name_list=sp_name_list,
+                    scales=scales,
+                    act_samples=act_samples,
+                    weight_scores=weight_scores,
+                    router_logits=router_logits,
+                    layer_gate_name=sp_name,
+                    expert_num=expert_num,
+                    select_expert_num=select_expert_num,
+                    share_expert_num=share_expert_num,
+                    fc1_scale_merge=fc1_scale_merge,
+                    alpha=alpha,
+                    logger=logger,
+                )
+                moe_fc1_smooth_scales[sp_name] = sm_scales.detach().cpu()
+            else:
+                logger.info(f"[smooth_lm] sp_name: {sp_name}")
+                logger.info(f"use prebuilt MoE fc1 smooth scale from {fc1_scale_merge}")
+                sm_scales = _get_moe_fc1_smooth_scale(moe_fc1_smooth_scales, sp_name, module.mlp.gate)
+                logger.info("scale={},max={},min={},scale.shape: {}".format(sm_scales, sm_scales.max(), sm_scales.min(), sm_scales.shape))
             smooth_ln_fcs(ffn_ln, fc1, sm_scales)
 
             for i in range(expert_num):
@@ -341,10 +514,35 @@ def smooth_lm(
             ffn_ln = module.post_attention_layernorm
             fc1 = [module.mlp.gate] + [module.mlp.experts[i].gate_proj for i in range(expert_num)] + [module.mlp.experts[i].up_proj for i in range(expert_num)] + [module.mlp.shared_expert.gate_proj, module.mlp.shared_expert.up_proj]
             sp_name = name + '.mlp.gate'
-            logger.info(f"[smooth_lm] sp_name: {sp_name}")
-            logger.info(f"use prebuilt MoE fc1 smooth scale from {fc1_scale_merge}")
-            sm_scales = _get_moe_fc1_smooth_scale(moe_fc1_smooth_scales, sp_name, module.mlp.gate)
-            logger.info("scale={},max={},min={},scale.shape: {}".format(sm_scales,sm_scales.max(), sm_scales.min(), sm_scales.shape))
+            if use_eaquant_merge:
+                fc1_split = [module.mlp.gate]
+                fc1_split += [[module.mlp.experts[i].gate_proj, module.mlp.experts[i].up_proj] for i in range(expert_num)]
+                fc1_split += [[module.mlp.shared_expert.gate_proj, module.mlp.shared_expert.up_proj]]
+                sp_name_list = [sp_name]
+                sp_name_list += [name + f'.mlp.experts.{i}.up_proj' for i in range(expert_num)]
+                sp_name_list += [name + '.mlp.shared_expert.up_proj']
+                logger.info("use EAQuant merge_scale for PanguProMoE fc1 smooth scale")
+                sm_scales = _build_eaquant_fc1_smooth_scale(
+                    fc1_split=fc1_split,
+                    sp_name_list=sp_name_list,
+                    scales=scales,
+                    act_samples=act_samples,
+                    weight_scores=weight_scores,
+                    router_logits=router_logits,
+                    layer_gate_name=sp_name,
+                    expert_num=expert_num,
+                    select_expert_num=select_expert_num,
+                    share_expert_num=share_expert_num,
+                    fc1_scale_merge=fc1_scale_merge,
+                    alpha=alpha,
+                    logger=logger,
+                )
+                moe_fc1_smooth_scales[sp_name] = sm_scales.detach().cpu()
+            else:
+                logger.info(f"[smooth_lm] sp_name: {sp_name}")
+                logger.info(f"use prebuilt MoE fc1 smooth scale from {fc1_scale_merge}")
+                sm_scales = _get_moe_fc1_smooth_scale(moe_fc1_smooth_scales, sp_name, module.mlp.gate)
+                logger.info("scale={},max={},min={},scale.shape: {}".format(sm_scales,sm_scales.max(), sm_scales.min(), sm_scales.shape))
             smooth_ln_fcs(ffn_ln, fc1, sm_scales)
 
             for i in range(expert_num):

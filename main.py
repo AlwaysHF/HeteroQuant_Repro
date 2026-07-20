@@ -332,7 +332,7 @@ def run_smooth_lm_stage(
     refresh_act_stats_cache,  # 是否强制重新计算并覆盖 Smooth 统计缓存
 
     # smooth / migration config
-    fc1_scale_merge,  # MoE fc1/gate/up 平滑尺度构造策略；当前仅支持 act_mean/act_p99
+    fc1_scale_merge,  # MoE fc1/gate/up 平滑尺度构造策略；支持 act_mean/act_p99/EAQuant max
     alpha,  # SmoothQuant 中 activation scale 与 weight scale 的平衡系数
     otsu_ratio,  # Otsu outlier 判断使用的分位比例
     otsu_smooth_rate,  # Otsu outlier 通道的平滑强度
@@ -347,20 +347,25 @@ def run_smooth_lm_stage(
     smooth_start = time.perf_counter()
     convert_device(lm, model_name)  # 设置分片
 
-    if fc1_scale_merge not in ("act_mean", "act_p99"):
+    if fc1_scale_merge not in ("act_mean", "act_p99", "max"):
         raise ValueError(
-            "--fc1_scale_merge must be either 'act_mean' or 'act_p99' "
+            "--fc1_scale_merge must be 'act_mean', 'act_p99', or 'max' "
             "in the current MoE-aware smoothing pipeline."
         )
 
-    moe_stat_name = "moe_act_means" if fc1_scale_merge == "act_mean" else "moe_act_p99s"
     act_samples = {}
     weight_scores = {}
     router_logits = {}
 
     smooth_stat_values = {}
     missing_smooth_stats = []
-    for stat_name in (moe_stat_name, "act_scales", "act_per_channel_scales"):
+    stat_names = ["act_scales", "act_per_channel_scales"]
+    if fc1_scale_merge == "act_mean":
+        stat_names.insert(0, "moe_act_means")
+    elif fc1_scale_merge == "act_p99":
+        stat_names.insert(0, "moe_act_p99s")
+
+    for stat_name in stat_names:
         found, value = _load_smooth_stat_cache(
             cache_dir=cache_dir,
             model=model_path,
@@ -411,19 +416,30 @@ def run_smooth_lm_stage(
                 value=combined_stats[stat_name],
             )
 
-    moe_act_stats = smooth_stat_values[moe_stat_name]
     act_scales = smooth_stat_values["act_scales"]
     act_per_channel_scales = smooth_stat_values["act_per_channel_scales"]
 
-    moe_fc1_smooth_scales = build_moe_fc1_smooth_scales(
-        moe_act_stats,
-        act_mean_beta=act_mean_beta,
-        model=lm.model,
-    )
-    logger.info(
-        f"built moe_fc1_smooth_scales entries: {len(moe_fc1_smooth_scales)} "
-        f"from {moe_stat_name}"
-    )
+    if fc1_scale_merge == "max":
+        logger.info(
+            "compute EAQuant smooth stats for fc1_scale_merge=max: "
+            "act_samples, weight_scores, router_logits"
+        )
+        act_samples = get_act_samples(lm.model, dataloader, nsamples)
+        weight_scores = get_weight_scores(lm.model)
+        router_logits = get_router_logits(lm.model, dataloader, nsamples)
+        moe_fc1_smooth_scales = {}
+    else:
+        moe_stat_name = "moe_act_means" if fc1_scale_merge == "act_mean" else "moe_act_p99s"
+        moe_act_stats = smooth_stat_values[moe_stat_name]
+        moe_fc1_smooth_scales = build_moe_fc1_smooth_scales(
+            moe_act_stats,
+            act_mean_beta=act_mean_beta,
+            model=lm.model,
+        )
+        logger.info(
+            f"built moe_fc1_smooth_scales entries: {len(moe_fc1_smooth_scales)} "
+            f"from {moe_stat_name}"
+        )
 
     smooth_lm(
         lm.model,
@@ -538,7 +554,7 @@ def main():
         "--fc1_scale_merge",
         type=str,
         default="act_mean",
-        choices=["act_mean", "act_p99"],
+        choices=["act_mean", "act_p99", "max"],
         help="MoE gate/up migration scale construction method",
     )
     parser.add_argument("--moe_down_smooth_mode", type=str, default="duquant", choices=["duquant", "otsu"], help="MoE down_proj smoothing mode; duquant matches the original DuQuant fc-fc scale")

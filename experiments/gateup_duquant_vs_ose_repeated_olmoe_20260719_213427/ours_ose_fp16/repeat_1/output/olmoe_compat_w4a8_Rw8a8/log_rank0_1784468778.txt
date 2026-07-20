@@ -1,0 +1,2 @@
+[2026-07-19 21:46:18 root] (main.py 652): INFO args.output_dir: /home/lwk/HeteroQuant_Repro/experiments/gateup_duquant_vs_ose_repeated_olmoe_20260719_213427/ours_ose_fp16/repeat_1/output/olmoe_compat_w4a8_Rw8a8
+[2026-07-19 21:46:18 root] (main.py 654): INFO loaded moe quant plan from /home/lwk/HeteroQuant_Repro/experiments/remaining_ablation_suite_20260716_210440/component/full_method/plans/moe_quant_plan_routed_tail.json: 3072 expert projection entries
