@@ -1,0 +1,205 @@
+{
+  "format": "duquant_olmoe_expert_distribution_plan_v2",
+  "metric": "random",
+  "score_key": "random_score",
+  "selection_scope": "per_layer",
+  "plan_granularity": "expert",
+  "target_avg_sum_bits": 12.0,
+  "actual_avg_sum_bits": 12.0,
+  "target_equivalent_avg_aw_bits": 6.0,
+  "actual_equivalent_avg_aw_bits": 6.0,
+  "weight_channel_group_size": 1,
+  "score_transform": "raw",
+  "input_score_coef": 1.0,
+  "down_score_coef": 1.0,
+  "weight_score_coef": 1.0,
+  "weight_score_projs": [
+    "gate_proj",
+    "up_proj",
+    "down_proj"
+  ],
+  "num_experts": 1024,
+  "num_records": 1024,
+  "num_modules": 3072,
+  "tier_fractions": [
+    0.234375,
+    0.59375,
+    0.171875
+  ],
+  "tier_quants": [
+    {
+      "name": "w4g-1-a4g-1",
+      "abits": 4,
+      "wbits": 4,
+      "act_group_size": null,
+      "weight_group_size": null,
+      "sum_bits_cost": 8.0,
+      "cost_units": 8000
+    },
+    {
+      "name": "w5g-1-a8g-1",
+      "abits": 8,
+      "wbits": 5,
+      "act_group_size": null,
+      "weight_group_size": null,
+      "sum_bits_cost": 13.0,
+      "cost_units": 13000
+    },
+    {
+      "name": "w6g-1-a8g-1",
+      "abits": 8,
+      "wbits": 6,
+      "act_group_size": null,
+      "weight_group_size": null,
+      "sum_bits_cost": 14.0,
+      "cost_units": 14000
+    }
+  ],
+  "high_fraction_target": 0.765625,
+  "high_expert_count": 784,
+  "high_expert_fraction": 0.765625,
+  "low_quant": {
+    "name": "w4g-1-a4g-1",
+    "abits": 4,
+    "wbits": 4,
+    "act_group_size": null,
+    "weight_group_size": null,
+    "sum_bits_cost": 8.0,
+    "cost_units": 8000
+  },
+  "high_quant": {
+    "name": "w6g-1-a8g-1",
+    "abits": 8,
+    "wbits": 6,
+    "act_group_size": null,
+    "weight_group_size": null,
+    "sum_bits_cost": 14.0,
+    "cost_units": 14000
+  },
+  "expert_quantization_counts": {
+    "w5g-1-a8g-1": 608,
+    "w6g-1-a8g-1": 176,
+    "w4g-1-a4g-1": 240
+  },
+  "quantization_counts": {
+    "w5g-1-a8g-1": 1824,
+    "w6g-1-a8g-1": 528,
+    "w4g-1-a4g-1": 720
+  },
+  "by_layer": {
+    "0": {
+      "w5g-1-a8g-1": 114,
+      "w6g-1-a8g-1": 33,
+      "w4g-1-a4g-1": 45
+    },
+    "1": {
+      "w5g-1-a8g-1": 114,
+      "w6g-1-a8g-1": 33,
+      "w4g-1-a4g-1": 45
+    },
+    "2": {
+      "w6g-1-a8g-1": 33,
+      "w5g-1-a8g-1": 114,
+      "w4g-1-a4g-1": 45
+    },
+    "3": {
+      "w6g-1-a8g-1": 33,
+      "w5g-1-a8g-1": 114,
+      "w4g-1-a4g-1": 45
+    },
+    "4": {
+      "w5g-1-a8g-1": 114,
+      "w4g-1-a4g-1": 45,
+      "w6g-1-a8g-1": 33
+    },
+    "5": {
+      "w5g-1-a8g-1": 114,
+      "w4g-1-a4g-1": 45,
+      "w6g-1-a8g-1": 33
+    },
+    "6": {
+      "w6g-1-a8g-1": 33,
+      "w5g-1-a8g-1": 114,
+      "w4g-1-a4g-1": 45
+    },
+    "7": {
+      "w6g-1-a8g-1": 33,
+      "w5g-1-a8g-1": 114,
+      "w4g-1-a4g-1": 45
+    },
+    "8": {
+      "w5g-1-a8g-1": 114,
+      "w6g-1-a8g-1": 33,
+      "w4g-1-a4g-1": 45
+    },
+    "9": {
+      "w6g-1-a8g-1": 33,
+      "w5g-1-a8g-1": 114,
+      "w4g-1-a4g-1": 45
+    },
+    "10": {
+      "w5g-1-a8g-1": 114,
+      "w4g-1-a4g-1": 45,
+      "w6g-1-a8g-1": 33
+    },
+    "11": {
+      "w5g-1-a8g-1": 114,
+      "w4g-1-a4g-1": 45,
+      "w6g-1-a8g-1": 33
+    },
+    "12": {
+      "w5g-1-a8g-1": 114,
+      "w4g-1-a4g-1": 45,
+      "w6g-1-a8g-1": 33
+    },
+    "13": {
+      "w5g-1-a8g-1": 114,
+      "w6g-1-a8g-1": 33,
+      "w4g-1-a4g-1": 45
+    },
+    "14": {
+      "w5g-1-a8g-1": 114,
+      "w6g-1-a8g-1": 33,
+      "w4g-1-a4g-1": 45
+    },
+    "15": {
+      "w4g-1-a4g-1": 45,
+      "w5g-1-a8g-1": 114,
+      "w6g-1-a8g-1": 33
+    }
+  },
+  "by_proj_name": {
+    "down_proj": {
+      "w5g-1-a8g-1": 608,
+      "w6g-1-a8g-1": 176,
+      "w4g-1-a4g-1": 240
+    },
+    "gate_proj": {
+      "w5g-1-a8g-1": 608,
+      "w6g-1-a8g-1": 176,
+      "w4g-1-a4g-1": 240
+    },
+    "up_proj": {
+      "w5g-1-a8g-1": 608,
+      "w6g-1-a8g-1": 176,
+      "w4g-1-a4g-1": 240
+    }
+  },
+  "score_min": 0.0004868090198870879,
+  "score_max": 0.9986269454512261,
+  "score_mean": 0.5053348686087386,
+  "selected_score_mean": 0.6192216437009702,
+  "model": "/home/lwk/HeteroQuant_Repro/local_models/olmoe_compat",
+  "calib_dataset": "wikitext2",
+  "nsamples": 32,
+  "seq_length": 4096,
+  "seed": 2,
+  "smooth": true,
+  "fc1_scale_merge": "act_p99",
+  "act_mean_beta": 1.0,
+  "route_alpha": 1.0,
+  "moe_outlier_topk": 64,
+  "moe_outlier_score": "smooth_scale",
+  "weight_stats_mode": "post_outlier_residual",
+  "elapsed_seconds": 103.9778704047203
+}

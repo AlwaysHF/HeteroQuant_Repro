@@ -40,7 +40,13 @@ from categories import subcategories, categories
 from utils import *
 
 from quantize.smooth import build_moe_fc1_smooth_scales, smooth_lm
-from quantize.moe_outlier_score import prepare_moe_outlier_scores
+from quantize.moe_outlier_score import (
+    MOE_OUTLIER_SCORE_CHOICES,
+    moe_outlier_score_can_prepare_without_smooth,
+    moe_outlier_score_requires_smooth,
+    normalize_moe_outlier_score,
+    prepare_moe_outlier_scores,
+)
 import logging
 torch.backends.cudnn.benchmark = True
 
@@ -461,6 +467,7 @@ def run_smooth_lm_stage(
         lm.model,
         score_method=moe_outlier_score,
         moe_fc1_smooth_scales=moe_fc1_smooth_scales,
+        act_scales=act_scales,
         args=args,
         model_name=model_name,
         logger=logger,
@@ -594,7 +601,7 @@ def main():
         "--moe_outlier_score",
         type=str,
         default="smooth_scale",
-        choices=["smooth_scale", "weight_max", "weight_error"],
+        choices=MOE_OUTLIER_SCORE_CHOICES,
         help="score used to select MoE gate/up outlier input columns",
     )
     parser.add_argument(
@@ -618,8 +625,9 @@ def main():
         raise ValueError("--router_weight_channel_group_size must be positive, -1, or unset")
     if args.router_weight_channel_group_size is None:
         args.router_weight_channel_group_size = args.weight_channel_group_size
-    if args.moe_outlier_score == "smooth_scale" and not args.smooth:
-        raise ValueError("--moe_outlier_score smooth_scale requires --smooth")
+    args.moe_outlier_score = normalize_moe_outlier_score(args.moe_outlier_score)
+    if moe_outlier_score_requires_smooth(args.moe_outlier_score) and not args.smooth:
+        raise ValueError("--moe_outlier_score smooth_scale/layer_shared_scale/shared_scale requires --smooth")
     args.moe_outlier_scores = {}
     if args.fast_moe_calib_tokens <= 0:
         raise ValueError("--fast_moe_calib_tokens must be positive")
@@ -827,7 +835,7 @@ def main():
                 args=args,
             )
             args.moe_outlier_scores = smooth_stage["moe_outlier_scores"]
-        elif args.moe_outlier_topk > 0 and args.moe_outlier_score in ("weight_max", "weight_error"):
+        elif args.moe_outlier_topk > 0 and moe_outlier_score_can_prepare_without_smooth(args.moe_outlier_score):
             logger.info(
                 "prepare module-level moe_outlier_scores before DuQuant "
                 f"without smooth; score_method={args.moe_outlier_score}"

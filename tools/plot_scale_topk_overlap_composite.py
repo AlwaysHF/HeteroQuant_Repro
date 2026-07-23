@@ -88,6 +88,27 @@ HIGHLIGHT_BOX = {
     "line_width": 1.05,
 }
 
+MEAN_LINE = {
+    "line_width": 3,
+    "alpha": 0.75,
+    "dash": "--",
+}
+
+FONT_SIZES = {
+    # Global default text size.
+    "base": 15,
+    # Axis label text, e.g. Count, Layer, Overlap (%).
+    "axis_label": 16,
+    # Tick label numbers on x/y axes.
+    "tick_label": 12,
+    # Legend text in the first left panel.
+    "legend": 15,
+    # Mean-overlap annotation in the right curve panels.
+    "mean_text": 17,
+    # Subfigure captions under each panel: (a), (b), ...
+    "panel_caption": 17,
+}
+
 LEFT_X_TICK_COUNT = 5
 DEFAULT_OLMOE_LAYERS = "4,0"
 DEFAULT_QWEN_LAYERS = "0,2"
@@ -165,12 +186,11 @@ def setup_style():
     plt.rcParams.update(
         {
             "font.family": "DejaVu Sans",
-            "font.size": 8.2,
-            "axes.titlesize": 8.7,
-            "axes.labelsize": 8.4,
-            "legend.fontsize": 7.8,
-            "xtick.labelsize": 7.4,
-            "ytick.labelsize": 7.4,
+            "font.size": FONT_SIZES["base"],
+            "axes.labelsize": FONT_SIZES["axis_label"],
+            "legend.fontsize": FONT_SIZES["legend"],
+            "xtick.labelsize": FONT_SIZES["tick_label"],
+            "ytick.labelsize": FONT_SIZES["tick_label"],
             "axes.facecolor": PALETTE["axes_face"],
             "figure.facecolor": PALETTE["figure_face"],
             "savefig.facecolor": PALETTE["figure_face"],
@@ -267,7 +287,14 @@ def plot_curve_panel(ax, results, model_label, color, highlight_layers):
         label=model_label,
         zorder=3,
     )
-    ax.axhline(overlaps.mean(), color=PALETTE["mean"], linestyle="--", linewidth=0.85, alpha=0.75, zorder=1)
+    ax.axhline(
+        overlaps.mean(),
+        color=PALETTE["mean"],
+        linestyle=MEAN_LINE["dash"],
+        linewidth=MEAN_LINE["line_width"],
+        alpha=MEAN_LINE["alpha"],
+        zorder=1,
+    )
     y_low = max(0.0, overlaps.min() - 8.0)
     y_high = min(100.0, overlaps.max() + 6.0)
     highlight_layers = set(int(layer) for layer in highlight_layers)
@@ -305,21 +332,22 @@ def plot_curve_panel(ax, results, model_label, color, highlight_layers):
         )
 
     ax.text(
-        0.025,
-        0.925,
+        0.965,
+        0.075,
         f"mean {overlaps.mean():.1f}%",
         transform=ax.transAxes,
-        ha="left",
-        va="center",
+        ha="right",
+        va="bottom",
         color=PALETTE["text"],
-        fontsize=7.8,
+        fontsize=FONT_SIZES["mean_text"],
         bbox=dict(facecolor=PALETTE["axes_face"], edgecolor="none", alpha=0.72, pad=0.7),
     )
     ax.set_ylabel("Overlap (%)")
-    ax.yaxis.set_label_position("left")
-    ax.yaxis.set_label_coords(-0.11, 0.5)
+    ax.yaxis.set_label_position("right")
+    ax.yaxis.set_label_coords(1.10, 0.5)
     ax.set_xlabel("Layer")
     style_axes(ax)
+    ax.set_facecolor(PALETTE["figure_face"])
     return highlight_geometry
 
 
@@ -355,7 +383,7 @@ def add_panel_caption(fig, ax, caption, y=None):
         caption,
         ha="center",
         va="top",
-        fontsize=8.8,
+        fontsize=FONT_SIZES["panel_caption"],
         color=PALETTE["text"],
     )
 

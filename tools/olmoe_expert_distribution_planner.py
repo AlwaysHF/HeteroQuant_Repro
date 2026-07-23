@@ -24,7 +24,13 @@ from tqdm import tqdm
 from datautils import get_loaders
 from models.LMClass import LMClass
 from quantize.smooth import build_moe_fc1_smooth_scales, smooth_lm
-from quantize.moe_outlier_score import prepare_moe_outlier_scores
+from quantize.moe_outlier_score import (
+    MOE_OUTLIER_SCORE_CHOICES,
+    moe_outlier_score_can_prepare_without_smooth,
+    moe_outlier_score_requires_smooth,
+    normalize_moe_outlier_score,
+    prepare_moe_outlier_scores,
+)
 from utils import (
     get_act_per_channel_scales,
     get_act_samples,
@@ -314,6 +320,7 @@ def apply_optional_smooth(lm, args, dataloader):
         model,
         score_method=args.moe_outlier_score,
         moe_fc1_smooth_scales=moe_fc1_smooth_scales,
+        act_scales=act_scales,
         args=args,
         model_name=args.model_name,
         logger=logger,
@@ -336,7 +343,7 @@ def _topk_outlier_input_channels_for_weight(weight, args, module_name):
     scores_by_module = getattr(args, "moe_outlier_scores", None) or {}
     if module_name in scores_by_module:
         scores = scores_by_module[module_name].detach().float().cpu().flatten()
-    elif getattr(args, "moe_outlier_score", "weight_max") == "weight_max":
+    elif normalize_moe_outlier_score(getattr(args, "moe_outlier_score", "weight_max")) == "weight_max":
         scores = weight.detach().abs().amax(dim=0).float().cpu()
     else:
         raise KeyError(f"missing moe_outlier_scores for {module_name}")
@@ -1178,7 +1185,7 @@ def main():
         help="output-channel group size for residual qerr simulation; -1 means one tensor scale per matrix",
     )
     parser.add_argument("--moe_outlier_topk", type=int, default=0)
-    parser.add_argument("--moe_outlier_score", default="weight_max", choices=["smooth_scale", "weight_max", "weight_error"])
+    parser.add_argument("--moe_outlier_score", default="weight_max", choices=MOE_OUTLIER_SCORE_CHOICES)
     parser.add_argument("--smooth", action="store_true")
     parser.add_argument("--fc1_scale_merge", default="act_mean")
     parser.add_argument("--act_mean_beta", type=float, default=2.0)
@@ -1195,8 +1202,9 @@ def main():
     parser.add_argument("--verbose_smooth_log", action="store_true")
     args = parser.parse_args()
 
-    if args.moe_outlier_score == "smooth_scale" and not args.smooth:
-        parser.error("--moe_outlier_score smooth_scale requires --smooth")
+    args.moe_outlier_score = normalize_moe_outlier_score(args.moe_outlier_score)
+    if moe_outlier_score_requires_smooth(args.moe_outlier_score) and not args.smooth:
+        parser.error("--moe_outlier_score smooth_scale/layer_shared_scale/shared_scale requires --smooth")
     args.moe_outlier_scores = {}
 
     if "qwen" in args.model_name.lower():
@@ -1226,7 +1234,7 @@ def main():
     lm.model.to(device)
     dataloader = load_calibration(args)
     apply_optional_smooth(lm, args, dataloader)
-    if not args.smooth and args.moe_outlier_topk > 0 and args.moe_outlier_score in ("weight_max", "weight_error"):
+    if not args.smooth and args.moe_outlier_topk > 0 and moe_outlier_score_can_prepare_without_smooth(args.moe_outlier_score):
         args.moe_outlier_scores = prepare_moe_outlier_scores(
             lm.model,
             score_method=args.moe_outlier_score,

@@ -1,0 +1,2 @@
+[2026-07-22 09:37:40 root] (main.py 652): INFO args.output_dir: /home/lwk/HeteroQuant_Repro/experiments/route_range_topk_group_ablation_olmoe_ppl_20260721_233425/group_128/topk_256/output/olmoe_compat_w4a8_Rw8a8
+[2026-07-22 09:37:40 root] (main.py 654): INFO loaded moe quant plan from /home/lwk/HeteroQuant_Repro/experiments/route_range_topk_group_ablation_olmoe_ppl_20260721_233425/group_128/plans/moe_quant_plan_routed_range.json: 3072 expert projection entries

@@ -1,0 +1,41 @@
+{
+  "format": "duquant_olmoe_expert_distribution_planner_v1",
+  "model": "/home/lwk/HeteroQuant_Repro/local_models/olmoe_compat",
+  "output_dir": "/home/lwk/HeteroQuant_Repro/experiments/module_ablation_route_range_group1_olmoe_ppl_20260722_163006/migration_ose_random_tier/plans",
+  "metrics": [
+    "random"
+  ],
+  "plan_paths": {
+    "random": "/home/lwk/HeteroQuant_Repro/experiments/module_ablation_route_range_group1_olmoe_ppl_20260722_163006/migration_ose_random_tier/plans/moe_quant_plan_random.json"
+  },
+  "scores_csv": "/home/lwk/HeteroQuant_Repro/experiments/module_ablation_route_range_group1_olmoe_ppl_20260722_163006/migration_ose_random_tier/plans/expert_distribution_scores.csv",
+  "scores_json": "/home/lwk/HeteroQuant_Repro/experiments/module_ablation_route_range_group1_olmoe_ppl_20260722_163006/migration_ose_random_tier/plans/expert_distribution_scores.json",
+  "plot_paths": [
+    "/home/lwk/HeteroQuant_Repro/experiments/module_ablation_route_range_group1_olmoe_ppl_20260722_163006/migration_ose_random_tier/plans/expert_score_random.png",
+    "/home/lwk/HeteroQuant_Repro/experiments/module_ablation_route_range_group1_olmoe_ppl_20260722_163006/migration_ose_random_tier/plans/expert_assignment_random.png"
+  ],
+  "low_quant": {
+    "name": "w4g-1-a4g-1",
+    "abits": 4,
+    "wbits": 4,
+    "act_group_size": null,
+    "weight_group_size": null,
+    "sum_bits_cost": 8.0,
+    "cost_units": 8000
+  },
+  "high_quant": {
+    "name": "w8g-1-a8g-1",
+    "abits": 8,
+    "wbits": 8,
+    "act_group_size": null,
+    "weight_group_size": null,
+    "sum_bits_cost": 16.0,
+    "cost_units": 16000
+  },
+  "target_avg_sum_bits": 12.0,
+  "selection_scope": "per_layer",
+  "moe_outlier_topk": 64,
+  "moe_outlier_score": "smooth_scale",
+  "weight_stats_mode": "post_outlier_residual",
+  "elapsed_seconds": 105.7381326071918
+}

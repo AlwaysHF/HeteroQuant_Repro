@@ -22,6 +22,30 @@ BIT_COLORS = {
     16: "#9D755D",
 }
 
+# Edit these values directly for repeated figure tuning.
+CONFIG = {
+    "plan": "/home/lwk/HeteroQuant_Repro/experiments/tier_set_routed_tail_olmoe_ppl_group2048_20260716_143501/3tier_w4a4_w5a8_w6a8/plans/moe_quant_plan_routed_tail.json",
+    "layer": 0,
+    "output_dir": "/home/lwk/HeteroQuant_Repro/figures/tier_assignment",
+    "prefix": None,
+    "title": None,
+    "show_title": False,
+    "tick_every": 4,
+    "bar_figsize": (13, 3.2),
+    "band_figsize": (13, 2.5),
+    "legend_y": 0.88,
+    "bar_top": 0.74,
+    "bar_bottom": 0.27,
+    "bar_left": 0.08,
+    "bar_right": 0.99,
+    "y_pad": 1,
+    "bar_yticks": [8, 4, 0, -6],
+    "label_size": 25,
+    "tick_size": 20,
+    "legend_size": 25,
+    "legend_marker_size": 15,
+}
+
 
 def load_plan(path):
     with open(path, "r") as f:
@@ -104,6 +128,12 @@ def parse_figsize(value):
     return float(parts[0]), float(parts[1])
 
 
+def parse_int_list(value):
+    if isinstance(value, (tuple, list)):
+        return [int(v) for v in value]
+    return [int(item.strip()) for item in str(value).split(",") if item.strip()]
+
+
 def plot_diverging_bars(
     rows,
     output_base,
@@ -114,7 +144,14 @@ def plot_diverging_bars(
     legend_y,
     bar_top,
     bar_bottom,
+    bar_left,
+    bar_right,
     y_pad,
+    bar_yticks,
+    label_size,
+    tick_size,
+    legend_size,
+    legend_marker_size,
 ):
     experts = [r["expert"] for r in rows]
     abits = np.array([r["abits"] for r in rows], dtype=float)
@@ -128,11 +165,16 @@ def plot_diverging_bars(
 
     max_abits = int(max(abits))
     max_wbits = int(max(wbits))
-    yticks = sorted(set([int(v) for v in abits] + [0] + [-int(v) for v in wbits]))
+    if bar_yticks:
+        yticks = sorted(int(v) for v in bar_yticks)
+    else:
+        yticks = sorted(set([int(v) for v in abits] + [0] + [-int(v) for v in wbits]))
     ax.set_yticks(yticks)
     ax.set_yticklabels([f"A{y}" if y > 0 else ("0" if y == 0 else f"W{-y}") for y in yticks])
     ax.set_ylim(-(max_wbits + y_pad), max_abits + y_pad)
-    ax.set_ylabel("Precision tier")
+    ax.set_xlabel("Expert ID", fontsize=label_size)
+    ax.set_ylabel("Precision tier", fontsize=label_size)
+    ax.tick_params(axis="both", labelsize=tick_size)
     if show_title:
         ax.set_title(title)
 
@@ -143,7 +185,7 @@ def plot_diverging_bars(
             [0],
             marker="s",
             linestyle="None",
-            markersize=5,
+            markersize=legend_marker_size,
             markerfacecolor=bit_color(bit),
             markeredgecolor=bit_color(bit),
             label=f"{bit}-bit",
@@ -156,7 +198,7 @@ def plot_diverging_bars(
         bbox_to_anchor=(0.5, legend_y),
         ncol=len(handles),
         frameon=False,
-        fontsize=10,
+        fontsize=legend_size,
         handlelength=0.7,
         handletextpad=0.25,
         columnspacing=0.9,
@@ -164,7 +206,7 @@ def plot_diverging_bars(
     )
 
     fig.tight_layout(pad=0.25)
-    fig.subplots_adjust(top=bar_top, bottom=bar_bottom, left=0.06, right=0.99)
+    fig.subplots_adjust(top=bar_top, bottom=bar_bottom, left=bar_left, right=bar_right)
     fig.savefig(output_base + "_bars.png", dpi=300)
     fig.savefig(output_base + "_bars.pdf")
     plt.close(fig)
@@ -232,19 +274,31 @@ def write_csv(rows, path):
 
 def main():
     parser = argparse.ArgumentParser(description="Plot per-layer expert tier assignments from a MoE quantization plan.")
-    parser.add_argument("--plan", required=True, help="Path to moe_quant_plan_*.json")
-    parser.add_argument("--layer", type=int, default=0)
-    parser.add_argument("--output_dir", default=None)
-    parser.add_argument("--prefix", default=None)
-    parser.add_argument("--title", default=None)
-    parser.add_argument("--show_title", action="store_true", help="Show the title at the top of the figure")
-    parser.add_argument("--tick_every", type=int, default=4)
-    parser.add_argument("--bar_figsize", type=parse_figsize, default=(13, 3.2), help="Bar figure size, e.g. 13,3.2 or 13x3.2")
-    parser.add_argument("--band_figsize", type=parse_figsize, default=(13, 2.5), help="Band figure size, e.g. 13,2.5 or 13x2.5")
-    parser.add_argument("--legend_y", type=float, default=0.9, help="Figure-level legend y position for the bar plot")
-    parser.add_argument("--bar_top", type=float, default=0.84, help="Top margin for the bar plot axes; larger moves plot closer to legend")
-    parser.add_argument("--bar_bottom", type=float, default=0.16, help="Bottom margin for the bar plot axes")
-    parser.add_argument("--y_pad", type=float, default=0.35, help="Y-axis padding around max A bits and max W bits")
+    parser.add_argument("--plan", default=CONFIG["plan"], help="Path to moe_quant_plan_*.json")
+    parser.add_argument("--layer", type=int, default=CONFIG["layer"])
+    parser.add_argument("--output_dir", default=CONFIG["output_dir"])
+    parser.add_argument("--prefix", default=CONFIG["prefix"])
+    parser.add_argument("--title", default=CONFIG["title"])
+    parser.add_argument(
+        "--show_title",
+        action="store_true",
+        default=CONFIG["show_title"],
+        help="Show the title at the top of the figure",
+    )
+    parser.add_argument("--tick_every", type=int, default=CONFIG["tick_every"])
+    parser.add_argument("--bar_figsize", type=parse_figsize, default=CONFIG["bar_figsize"], help="Bar figure size, e.g. 13,3.2 or 13x3.2")
+    parser.add_argument("--band_figsize", type=parse_figsize, default=CONFIG["band_figsize"], help="Band figure size, e.g. 13,2.5 or 13x2.5")
+    parser.add_argument("--legend_y", type=float, default=CONFIG["legend_y"], help="Figure-level legend y position for the bar plot")
+    parser.add_argument("--bar_top", type=float, default=CONFIG["bar_top"], help="Top margin for the bar plot axes; smaller leaves more room for legend")
+    parser.add_argument("--bar_bottom", type=float, default=CONFIG["bar_bottom"], help="Bottom margin for the bar plot axes; larger leaves more room for x label")
+    parser.add_argument("--bar_left", type=float, default=CONFIG["bar_left"], help="Left margin for the bar plot axes")
+    parser.add_argument("--bar_right", type=float, default=CONFIG["bar_right"], help="Right margin for the bar plot axes")
+    parser.add_argument("--y_pad", type=float, default=CONFIG["y_pad"], help="Y-axis padding around max A bits and max W bits")
+    parser.add_argument("--bar_yticks", type=parse_int_list, default=CONFIG["bar_yticks"], help="Y ticks for the bar plot, e.g. 8,4,0,-6")
+    parser.add_argument("--label_size", type=float, default=CONFIG["label_size"], help="Axis title font size for the bar plot")
+    parser.add_argument("--tick_size", type=float, default=CONFIG["tick_size"], help="Axis tick-label font size for the bar plot")
+    parser.add_argument("--legend_size", type=float, default=CONFIG["legend_size"], help="Legend font size for the bar plot")
+    parser.add_argument("--legend_marker_size", type=float, default=CONFIG["legend_marker_size"], help="Legend square marker size for the bar plot")
     args = parser.parse_args()
 
     records, summary = load_plan(args.plan)
@@ -273,7 +327,14 @@ def main():
         args.legend_y,
         args.bar_top,
         args.bar_bottom,
+        args.bar_left,
+        args.bar_right,
         args.y_pad,
+        args.bar_yticks,
+        args.label_size,
+        args.tick_size,
+        args.legend_size,
+        args.legend_marker_size,
     )
     plot_two_band_heatmap(rows, output_base, title, args.tick_every, args.band_figsize, args.show_title)
     write_csv(rows, output_base + ".csv")

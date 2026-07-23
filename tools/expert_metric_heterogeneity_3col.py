@@ -29,17 +29,91 @@ METRICS = {
     "range": "range_score",
 }
 
+# =====================================================
+# Font and legend controls
+# 修改字体/图例大小时，优先改这里，不需要进函数里逐个找 fontsize。
+# =====================================================
+
+PANEL_CAPTION_FONT_SIZE = 17.5  # controls all (a)-(f) subplot captions
+LEFT_COLUMN_ROW_HSPACE = 0.47   # controls vertical spacing among the left heatmap rows
+PANEL_CAPTION_XTICK_GAP_POINTS = 0.1  # vertical gap from x-axis numbers to captions
+SUBPLOT_X_AXIS_TITLE_FONT_SIZE = 16.0  # controls x-axis title fontsize, e.g. Expert rank (%)
+SUBPLOT_Y_AXIS_TITLE_FONT_SIZE = 16.0  # controls y-axis title fontsize, e.g. Layer ID / Score ratio
+SUBPLOT_X_TICK_FONT_SIZE = 14         # controls x-axis numeric tick fontsize
+SUBPLOT_Y_TICK_FONT_SIZE = 14         # controls y-axis numeric tick fontsize
+MODEL_NAME_FONT_SIZE = 15.0          # controls OLMoE/Qwen label at upper-left of curve plots
+CURVE_LEGEND_SCALE = 1.2             # scales the whole upper-right curve legend box
+
+# FONT_SIZES = {
+#     "base": 8.8,
+#     "axes_label": 9.2,
+#     "axes_title": 10.2,
+#     "tick": 7.8,
+#     "heatmap_axis_label": 8.2,
+#     "curve_axis_label": 8.0,
+#     "model_label": 9.2,
+#     "panel_caption": 9.2,
+#     "colorbar_tick": 8.0,
+#     "legend": 8.0,
+# }
+
+FONT_SIZES = {
+    "base": 10.5,
+    "axes_label": 11.0,
+    "axes_title": 11.5,
+    "tick": 9.5,
+    "x_tick": SUBPLOT_X_TICK_FONT_SIZE,
+    "y_tick": SUBPLOT_Y_TICK_FONT_SIZE,
+    "heatmap_axis_label": 10.0,
+    "curve_axis_label": 10.0,
+    "subplot_x_axis_label": SUBPLOT_X_AXIS_TITLE_FONT_SIZE,
+    "subplot_y_axis_label": SUBPLOT_Y_AXIS_TITLE_FONT_SIZE,
+    "model_label": MODEL_NAME_FONT_SIZE,
+    "panel_caption": PANEL_CAPTION_FONT_SIZE,
+    "colorbar_tick": 11,
+    "legend": 9.5,
+}
+
+# Overall multiplier for every text element in this figure.
+# Keep this at 1.0 to preserve the original figure aspect/layout.
+FONT_SCALE = 1.0
+
+
+def font_size(key):
+    return FONT_SIZES[key] * FONT_SCALE
+
+
+LEGEND_STYLE = {
+    "fontsize": font_size("legend") * CURVE_LEGEND_SCALE,
+    "handlelength": 1.8 * CURVE_LEGEND_SCALE,
+    "handletextpad": 0.45 * CURVE_LEGEND_SCALE,
+    "borderpad": 0.35 * CURVE_LEGEND_SCALE,
+    "labelspacing": 0.35 * CURVE_LEGEND_SCALE,
+    "line_width": 1.7 * CURVE_LEGEND_SCALE,
+}
+
+
+
+# LEGEND_STYLE = {
+#     "fontsize": FONT_SIZES["legend"],
+#     "handlelength": 1.8,
+#     "handletextpad": 0.45,
+#     "borderpad": 0.35,
+#     "labelspacing": 0.35,
+#     "line_width": 1.7,
+# }
+
 
 def paper_style():
     plt.rcParams.update(
         {
             "font.family": "DejaVu Sans",
-            "font.size": 8.8,
-            "axes.labelsize": 9.2,
-            "axes.titlesize": 10.2,
-            "legend.fontsize": 8.0,
-            "xtick.labelsize": 7.8,
-            "ytick.labelsize": 7.8,
+            "font.size": font_size("base"),
+            "axes.labelsize": font_size("axes_label"),
+            "axes.titlesize": font_size("axes_title"),
+            "legend.fontsize": font_size("legend"),
+            "xtick.labelsize": font_size("x_tick"),
+            "ytick.labelsize": font_size("y_tick"),
             "axes.linewidth": 0.8,
             "figure.facecolor": "white",
             "savefig.facecolor": "white",
@@ -83,7 +157,8 @@ def ratio_to_heat(ratio):
 
 
 def style_heatmap_axis(ax):
-    ax.tick_params(axis="both", which="both", length=0, pad=2)
+    ax.tick_params(axis="x", which="both", length=0, pad=2, labelsize=font_size("x_tick"))
+    ax.tick_params(axis="y", which="both", length=0, pad=2, labelsize=font_size("y_tick"))
     for spine in ax.spines.values():
         spine.set_visible(False)
 
@@ -92,7 +167,7 @@ def format_zoom_ticks(ax, experts):
     n = len(experts)
     ticks = np.unique(np.linspace(0, n - 1, min(5, n), dtype=int))
     ax.set_xticks(ticks)
-    ax.set_xticklabels([str(experts[i]) for i in ticks])
+    ax.set_xticklabels([str(experts[i]) for i in ticks], fontsize=font_size("x_tick"))
     ax.set_yticks([])
 
 
@@ -153,11 +228,11 @@ def add_heatmap_case(
     else:
         ytick_idx = np.unique(np.linspace(0, len(layers) - 1, min(7, len(layers)), dtype=int))
     ax_full.set_yticks(ytick_idx)
-    ax_full.set_yticklabels([str(layers[i]) for i in ytick_idx])
+    ax_full.set_yticklabels([str(layers[i]) for i in ytick_idx], fontsize=font_size("y_tick"))
     xticks = np.unique(np.linspace(0, len(experts) - 1, min(5, len(experts)), dtype=int))
     ax_full.set_xticks(xticks)
-    ax_full.set_xticklabels([str(experts[i]) for i in xticks])
-    ax_full.set_ylabel("Layer ID", labelpad=1, fontsize=8.2)
+    ax_full.set_xticklabels([str(experts[i]) for i in xticks], fontsize=font_size("x_tick"))
+    ax_full.set_ylabel("Layer ID", labelpad=1, fontsize=font_size("subplot_y_axis_label"))
     style_heatmap_axis(ax_full)
 
     zoom = heat[zoom_idx : zoom_idx + 1, :]
@@ -182,13 +257,15 @@ def style_curve_axis(ax, model_label, show_xlabel=False):
     ax.set_xlim(0, 100)
     ax.axhline(1.0, color="#BEB6AA", linewidth=0.8, linestyle="--", zorder=0)
     ax.set_yticks([0.5, 1.0, 2.0, 4.0, 8.0])
-    ax.set_yticklabels(["0.5x", "1x", "2x", "4x", "8x"])
+    ax.set_yticklabels(["0.5x", "1x", "2x", "4x", "8x"], fontsize=font_size("y_tick"))
     ax.set_xticks([0, 25, 50, 75, 100])
+    ax.tick_params(axis="x", labelsize=font_size("x_tick"))
+    ax.tick_params(axis="y", labelsize=font_size("y_tick"))
     if not show_xlabel:
         ax.set_xticklabels([])
     else:
-        ax.set_xlabel("Expert rank (%)", labelpad=1, fontsize=8.0)
-    ax.set_ylabel("Score ratio", labelpad=2, fontsize=8.0)
+        ax.set_xlabel("Expert rank (%)", labelpad=1, fontsize=font_size("subplot_x_axis_label"))
+    ax.set_ylabel("Score ratio", labelpad=2, fontsize=font_size("subplot_y_axis_label"))
     ax.yaxis.set_label_position("right")
     ax.text(
         0.035,
@@ -197,7 +274,7 @@ def style_curve_axis(ax, model_label, show_xlabel=False):
         transform=ax.transAxes,
         ha="left",
         va="top",
-        fontsize=9.2,
+        fontsize=font_size("model_label"),
         fontweight="semibold",
         color="#303030",
     )
@@ -239,10 +316,30 @@ def add_sorted_curves(ax, df, model_label, show_xlabel=False):
         framealpha=0.95,
         facecolor="white",
         edgecolor="#CFC6B8",
-        handlelength=1.8,
+        fontsize=LEGEND_STYLE["fontsize"],
+        handlelength=LEGEND_STYLE["handlelength"],
+        handletextpad=LEGEND_STYLE["handletextpad"],
+        borderpad=LEGEND_STYLE["borderpad"],
+        labelspacing=LEGEND_STYLE["labelspacing"],
     )
     for line in legend.get_lines():
-        line.set_linewidth(1.7)
+        line.set_linewidth(LEGEND_STYLE["line_width"])
+
+
+def caption_y_below_xticks(fig, axes, gap_points):
+    renderer = fig.canvas.get_renderer()
+    tick_bboxes = []
+    for ax in axes:
+        for label in ax.get_xticklabels():
+            if label.get_visible() and label.get_text():
+                tick_bboxes.append(label.get_window_extent(renderer=renderer))
+
+    if not tick_bboxes:
+        return min(ax.get_position().y0 for ax in axes)
+
+    lowest_tick_y_px = min(bbox.y0 for bbox in tick_bboxes)
+    gap_px = float(gap_points) * fig.dpi / 72.0
+    return fig.transFigure.inverted().transform((0.0, lowest_tick_y_px - gap_px))[1]
 
 
 def main():
@@ -284,8 +381,8 @@ def main():
         right=0.955,
         bottom=0.13,
         top=0.945,
-        wspace=0.14,
-        hspace=0.32,
+        wspace=0.22,
+        hspace=LEFT_COLUMN_ROW_HSPACE,
     )
 
     last_im = None
@@ -371,25 +468,6 @@ def main():
         "(c) Qwen tail",
         "(d) Qwen range",
     ]
-    for caption, ax_full, ax_zoom in zip(panel_captions, heatmap_axes, zoom_axes):
-        p0 = ax_full.get_position()
-        p1 = ax_zoom.get_position()
-        x = 0.5 * (p0.x0 + p1.x1)
-        y = min(p0.y0, p1.y0) - 0.023
-        fig.text(x, y, caption, ha="center", va="top", fontsize=9.2)
-
-    # for caption, ax_curve in [
-    #     ("(e) OLMoE sorted score distribution", ax_curve_olmoe),
-    #     ("(f) Qwen sorted score distribution", ax_curve_qwen),
-    # ]:
-    #     p = ax_curve.get_position()
-    #     fig.text(0.5 * (p.x0 + p.x1), p.y0 - 0.040, caption, ha="center", va="top", fontsize=9.2)
-    panel_captions = [
-        "(a) OLMoE tail",
-        "(b) OLMoE range",
-        "(c) Qwen tail",
-        "(d) Qwen range",
-    ]
 
     # 保存 a、b、c、d 四个标题的纵坐标，
     # 后面让 e 与 b 对齐，f 与 d 对齐
@@ -404,7 +482,11 @@ def main():
         p1 = ax_zoom.get_position()
 
         x = 0.5 * (p0.x0 + p1.x1)
-        y = min(p0.y0, p1.y0) - 0.023
+        y = caption_y_below_xticks(
+            fig,
+            [ax_full, ax_zoom],
+            PANEL_CAPTION_XTICK_GAP_POINTS,
+        )
 
         heatmap_caption_y.append(y)
 
@@ -414,7 +496,7 @@ def main():
             caption,
             ha="center",
             va="top",
-            fontsize=9.2,
+            fontsize=font_size("panel_caption"),
         )
 
     # 折线图标题：
@@ -422,12 +504,12 @@ def main():
     # f 与 d 使用完全相同的纵坐标
     curve_captions = [
         (
-            "(e) OLMoE sorted score distribution",
+            "(e) OLMoE sorted score",
             ax_curve_olmoe,
             heatmap_caption_y[1],  # 与 (b) 对齐
         ),
         (
-            "(f) Qwen sorted score distribution",
+            "(f) Qwen sorted score",
             ax_curve_qwen,
             heatmap_caption_y[3],  # 与 (d) 对齐
         ),
@@ -443,7 +525,7 @@ def main():
             caption,
             ha="center",
             va="top",
-            fontsize=9.2,
+            fontsize=font_size("panel_caption"),
         )
 
 
@@ -476,8 +558,8 @@ def main():
 
     cbar = fig.colorbar(last_im, cax=cax)
     cbar.set_ticks([])
-    cbar.ax.text(0.5, 1.015, "2x", transform=cbar.ax.transAxes, ha="center", va="bottom", fontsize=8.0)
-    cbar.ax.text(0.5, -0.020, "0.5x", transform=cbar.ax.transAxes, ha="center", va="top", fontsize=8.0)
+    cbar.ax.text(0.5, 1.015, "2x", transform=cbar.ax.transAxes, ha="center", va="bottom", fontsize=font_size("colorbar_tick"))
+    cbar.ax.text(0.5, -0.020, "0.5x", transform=cbar.ax.transAxes, ha="center", va="top", fontsize=font_size("colorbar_tick"))
     cbar.outline.set_linewidth(0.65)
 
     for ext in ("png", "pdf"):

@@ -1,3 +1,5 @@
+import hashlib
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,6 +12,39 @@ try:
 except Exception:
     class Qwen2MoeDecoderLayer(nn.Module):
         pass
+
+
+MOE_OUTLIER_SCORE_ALIASES = {
+    "layer_shared_scale": "smooth_scale",
+    "expert_max": "weight_max",
+    "expert_error": "weight_error",
+    "expert_p99/mean": "expert_p99_mean",
+}
+MOE_OUTLIER_SCORE_CHOICES = (
+    "smooth_scale",
+    "weight_max",
+    "weight_error",
+    "random",
+    "shared_scale",
+    "expert_p99_mean",
+    "layer_shared_scale",
+    "expert_max",
+    "expert_error",
+    "expert_p99/mean",
+)
+MOE_OUTLIER_WEIGHT_SCORE_METHODS = ("weight_max", "weight_error", "expert_p99_mean", "random")
+
+
+def normalize_moe_outlier_score(score_method):
+    return MOE_OUTLIER_SCORE_ALIASES.get(score_method, score_method)
+
+
+def moe_outlier_score_requires_smooth(score_method):
+    return normalize_moe_outlier_score(score_method) in ("smooth_scale", "shared_scale")
+
+
+def moe_outlier_score_can_prepare_without_smooth(score_method):
+    return normalize_moe_outlier_score(score_method) in MOE_OUTLIER_WEIGHT_SCORE_METHODS
 
 
 def _normalize_group_size(value):
@@ -163,6 +198,21 @@ def _weight_max_by_input_channel(module):
     return module.weight.detach().abs().amax(dim=0).float().cpu()
 
 
+def _weight_p99_mean_by_input_channel(module):
+    weight_abs = module.weight.detach().abs().float().cpu()
+    mean = weight_abs.mean(dim=0).clamp(min=1e-8)
+    p99 = torch.quantile(weight_abs, 0.99, dim=0)
+    return p99 / mean
+
+
+def _random_by_input_channel(module, module_name):
+    digest = hashlib.sha256(str(module_name).encode("utf-8")).hexdigest()
+    seed = int(digest[:16], 16) % (2 ** 63)
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    return torch.rand(module.in_features, generator=generator)
+
+
 def _clean_scores(scores):
     return torch.nan_to_num(scores.detach().float().cpu().flatten(), nan=0.0, posinf=0.0, neginf=0.0).clamp(min=0)
 
@@ -192,10 +242,15 @@ def _sanitize_or_fallback(scores, module, module_name, logger):
 
 
 def _module_weight_score(module, module_name, score_method, args, logger):
+    score_method = normalize_moe_outlier_score(score_method)
     if score_method == "weight_max":
         scores = _weight_max_by_input_channel(module)
     elif score_method == "weight_error":
         scores = weight_quant_error_by_input_channel(module, args)
+    elif score_method == "expert_p99_mean":
+        scores = _weight_p99_mean_by_input_channel(module)
+    elif score_method == "random":
+        scores = _random_by_input_channel(module, module_name)
     else:
         raise ValueError(f"unsupported weight score method: {score_method}")
     return _sanitize_or_fallback(scores, module, module_name, logger)
@@ -208,12 +263,39 @@ def _smooth_scale_for_layer(layer_name, moe_fc1_smooth_scales):
     return moe_fc1_smooth_scales[gate_name]
 
 
-def _add_expert_scores(scores, module_name, gate_proj, up_proj, score_method, args, logger, layer_score=None):
+def _expert_activation_scale(module_name, act_scales):
+    if act_scales is None:
+        raise KeyError("missing act_scales for shared_scale OSE channel selection")
+    candidate_names = [f"{module_name}.up_proj", f"{module_name}.gate_proj"]
+    for candidate_name in candidate_names:
+        if candidate_name in act_scales:
+            return act_scales[candidate_name]
+    raise KeyError(
+        f"missing expert activation scale for {module_name}; "
+        f"tried {candidate_names}"
+    )
+
+
+def _add_expert_scores(
+    scores,
+    module_name,
+    gate_proj,
+    up_proj,
+    score_method,
+    args,
+    logger,
+    layer_score=None,
+    expert_score=None,
+):
+    score_method = normalize_moe_outlier_score(score_method)
     gate_name = f"{module_name}.gate_proj"
     up_name = f"{module_name}.up_proj"
     if score_method == "smooth_scale":
         scores[gate_name] = _sanitize_or_fallback(layer_score, gate_proj, gate_name, logger)
         scores[up_name] = _sanitize_or_fallback(layer_score, up_proj, up_name, logger)
+    elif score_method == "shared_scale":
+        scores[gate_name] = _sanitize_or_fallback(expert_score, gate_proj, gate_name, logger)
+        scores[up_name] = _sanitize_or_fallback(expert_score, up_proj, up_name, logger)
     else:
         scores[gate_name] = _module_weight_score(gate_proj, gate_name, score_method, args, logger)
         scores[up_name] = _module_weight_score(up_proj, up_name, score_method, args, logger)
@@ -225,13 +307,15 @@ def prepare_moe_outlier_scores(
     *,
     score_method,
     moe_fc1_smooth_scales=None,
+    act_scales=None,
     args=None,
     model_name=None,
     logger=None,
 ):
     if int(getattr(args, "moe_outlier_topk", 0)) <= 0:
         return {}
-    if score_method not in ("smooth_scale", "weight_max", "weight_error"):
+    score_method = normalize_moe_outlier_score(score_method)
+    if score_method not in ("smooth_scale", "shared_scale", "weight_max", "weight_error", "expert_p99_mean", "random"):
         raise ValueError(f"unsupported moe_outlier_score: {score_method}")
 
     scores = {}
@@ -241,40 +325,49 @@ def prepare_moe_outlier_scores(
             seen_moe_layer = True
             layer_score = _smooth_scale_for_layer(layer_name, moe_fc1_smooth_scales) if score_method == "smooth_scale" else None
             for expert_idx, expert in enumerate(module.mlp.experts):
+                expert_name = f"{layer_name}.mlp.experts.{expert_idx}"
+                expert_score = _expert_activation_scale(expert_name, act_scales) if score_method == "shared_scale" else None
                 _add_expert_scores(
                     scores,
-                    f"{layer_name}.mlp.experts.{expert_idx}",
+                    expert_name,
                     expert.gate_proj,
                     expert.up_proj,
                     score_method,
                     args,
                     logger,
                     layer_score=layer_score,
+                    expert_score=expert_score,
                 )
 
         elif isinstance(module, Qwen2MoeDecoderLayer):
             seen_moe_layer = True
             layer_score = _smooth_scale_for_layer(layer_name, moe_fc1_smooth_scales) if score_method == "smooth_scale" else None
             for expert_idx, expert in enumerate(module.mlp.experts):
+                expert_name = f"{layer_name}.mlp.experts.{expert_idx}"
+                expert_score = _expert_activation_scale(expert_name, act_scales) if score_method == "shared_scale" else None
                 _add_expert_scores(
                     scores,
-                    f"{layer_name}.mlp.experts.{expert_idx}",
+                    expert_name,
                     expert.gate_proj,
                     expert.up_proj,
                     score_method,
                     args,
                     logger,
                     layer_score=layer_score,
+                    expert_score=expert_score,
                 )
+            shared_expert_name = f"{layer_name}.mlp.shared_expert"
+            shared_expert_score = _expert_activation_scale(shared_expert_name, act_scales) if score_method == "shared_scale" else None
             _add_expert_scores(
                 scores,
-                f"{layer_name}.mlp.shared_expert",
+                shared_expert_name,
                 module.mlp.shared_expert.gate_proj,
                 module.mlp.shared_expert.up_proj,
                 score_method,
                 args,
                 logger,
                 layer_score=layer_score,
+                expert_score=shared_expert_score,
             )
 
         elif isinstance(module, PanguProMoEDecoderLayer):
