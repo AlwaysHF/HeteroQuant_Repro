@@ -1,0 +1,5 @@
+ose_topk,active_experts,tokens_per_expert,total_tokens,duquant_once_ms,plain_no_ose_ms,ours_ose_w8a8_ms,speedup_over_duquant_once,ours_latency_std_ms
+16,1,1,1,1.582768,,0.946971,1.671401,0.008606
+16,8,1,1,1.022005,,1.158421,0.882240,0.262342
+64,1,1,1,1.253445,,0.971595,1.290090,0.043384
+64,8,1,1,1.170373,,1.404421,0.833349,0.007369

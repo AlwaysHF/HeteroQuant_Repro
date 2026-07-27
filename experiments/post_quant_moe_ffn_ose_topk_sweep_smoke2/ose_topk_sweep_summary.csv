@@ -1,0 +1,3 @@
+ose_topk,num_cases,speedup_min,speedup_median,speedup_mean,speedup_max,E1_speedup_median,E1_fast_cases,E8_speedup_median,E8_fast_cases,ose_branch_macs_per_routed_token,duquant_gateup_macs_per_routed_token,duquant_over_ose_macs
+16,2,0.882240,1.276820,1.276820,1.671401,1.671401,1,0.882240,0,32768,524288,16.000000
+64,2,0.833349,1.061719,1.061719,1.290090,1.290090,1,0.833349,0,131072,524288,4.000000

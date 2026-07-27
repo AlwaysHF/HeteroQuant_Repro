@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import os
 import statistics
 from dataclasses import dataclass
@@ -330,6 +331,76 @@ def _ose_w8a8_two_proj_add_kernel(
     tl.store(up_ptr + out_offs, up_out.to(tl.float16), mask=mask)
 
 
+@triton.jit
+def _dispatch_tokens_kernel(
+    hidden_ptr,
+    token_idx_ptr,
+    expert_x_ptr,
+    E: tl.constexpr,
+    M: tl.constexpr,
+    H: tl.constexpr,
+    TOTAL_TOKENS: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_h = tl.program_id(1)
+    pid_e = tl.program_id(2)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_h = pid_h * BLOCK_H + tl.arange(0, BLOCK_H)
+    valid_m = offs_m < M
+    token_idx = tl.load(token_idx_ptr + pid_e * M + offs_m, mask=valid_m, other=-1)
+    mask = (token_idx[:, None] >= 0) & (token_idx[:, None] < TOTAL_TOKENS) & (offs_h[None, :] < H)
+    vals = tl.load(
+        hidden_ptr + token_idx[:, None] * H + offs_h[None, :],
+        mask=mask,
+        other=0.0,
+    )
+    tl.store(
+        expert_x_ptr + pid_e * M * H + offs_m[:, None] * H + offs_h[None, :],
+        vals,
+        mask=(offs_m[:, None] < M) & (offs_h[None, :] < H),
+    )
+
+
+@triton.jit
+def _zero_kernel(ptr, TOTAL: tl.constexpr, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < TOTAL
+    tl.store(ptr + offs, tl.zeros((BLOCK,), tl.float32), mask=mask)
+
+
+@triton.jit
+def _scatter_weighted_add_kernel(
+    down_ptr,
+    token_idx_ptr,
+    route_weight_ptr,
+    final_ptr,
+    E: tl.constexpr,
+    M: tl.constexpr,
+    H: tl.constexpr,
+    TOTAL_TOKENS: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_h = tl.program_id(1)
+    pid_e = tl.program_id(2)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_h = pid_h * BLOCK_H + tl.arange(0, BLOCK_H)
+    valid_m = offs_m < M
+    token_idx = tl.load(token_idx_ptr + pid_e * M + offs_m, mask=valid_m, other=-1)
+    rw = tl.load(route_weight_ptr + pid_e * M + offs_m, mask=valid_m, other=0.0).to(tl.float32)
+    vals = tl.load(
+        down_ptr + pid_e * M * H + offs_m[:, None] * H + offs_h[None, :],
+        mask=valid_m[:, None] & (offs_h[None, :] < H),
+        other=0.0,
+    ).to(tl.float32)
+    mask = (token_idx[:, None] >= 0) & (token_idx[:, None] < TOTAL_TOKENS) & (offs_h[None, :] < H)
+    tl.atomic_add(final_ptr + token_idx[:, None] * H + offs_h[None, :], vals * rw[:, None], sem="relaxed", mask=mask)
+
+
 def parse_csv_ints(value: str) -> List[int]:
     out = [int(item.strip()) for item in value.split(",") if item.strip()]
     if not out:
@@ -399,6 +470,20 @@ def gather_ose_columns(weight: torch.Tensor, indices: torch.Tensor) -> torch.Ten
     return torch.stack(rows, dim=0).contiguous()
 
 
+def infer_total_tokens(active_experts: int, tokens_per_expert: int, router_top_k: int, requested: int) -> int:
+    if requested > 0:
+        return requested
+    routed = active_experts * tokens_per_expert
+    return max(1, math.ceil(routed / max(router_top_k, 1)))
+
+
+def make_token_metadata(active_experts: int, tokens_per_expert: int, total_tokens: int, device: str = "cuda") -> Tuple[torch.Tensor, torch.Tensor]:
+    routed = active_experts * tokens_per_expert
+    token_ids = (torch.arange(routed, device=device, dtype=torch.int64) % total_tokens).view(active_experts, tokens_per_expert)
+    route_weights = torch.rand((active_experts, tokens_per_expert), device=device, dtype=torch.float32)
+    return token_ids.contiguous(), route_weights.contiguous()
+
+
 def launch_dynamic_quant(x: torch.Tensor, q: torch.Tensor, scale: torch.Tensor, e: int, m: int, k: int) -> None:
     grid = (m, e)
     _dynamic_quant_sym_kernel[grid](
@@ -410,6 +495,41 @@ def launch_dynamic_quant(x: torch.Tensor, q: torch.Tensor, scale: torch.Tensor, 
         K=k,
         BLOCK_K=ceil_pow2(k),
         num_warps=8,
+    )
+
+
+def launch_dispatch(hidden_states: torch.Tensor, token_ids: torch.Tensor, expert_x: torch.Tensor, e: int, m: int, h: int, total_tokens: int, args) -> None:
+    grid = (triton.cdiv(m, args.block_m), triton.cdiv(h, args.block_n), e)
+    _dispatch_tokens_kernel[grid](
+        hidden_states,
+        token_ids,
+        expert_x,
+        E=e,
+        M=m,
+        H=h,
+        TOTAL_TOKENS=total_tokens,
+        BLOCK_M=args.block_m,
+        BLOCK_H=args.block_n,
+        num_warps=args.num_warps,
+    )
+
+
+def launch_scatter(down: torch.Tensor, token_ids: torch.Tensor, route_weights: torch.Tensor, final: torch.Tensor, e: int, m: int, h: int, total_tokens: int, args) -> None:
+    grid_zero = (triton.cdiv(total_tokens * h, args.elem_block),)
+    _zero_kernel[grid_zero](final, TOTAL=total_tokens * h, BLOCK=args.elem_block, num_warps=4)
+    grid = (triton.cdiv(m, args.block_m), triton.cdiv(h, args.block_n), e)
+    _scatter_weighted_add_kernel[grid](
+        down,
+        token_ids,
+        route_weights,
+        final,
+        E=e,
+        M=m,
+        H=h,
+        TOTAL_TOKENS=total_tokens,
+        BLOCK_M=args.block_m,
+        BLOCK_H=args.block_n,
+        num_warps=args.num_warps,
     )
 
 
@@ -549,7 +669,7 @@ def launch_ose_branch(
         ADD_TO_MAIN=add_to_main,
         BLOCK_M=args.block_m,
         BLOCK_N=args.block_n,
-        BLOCK_K=ceil_pow2(topk),
+        BLOCK_K=max(32, ceil_pow2(topk)),
         num_warps=args.num_warps,
         num_stages=4,
     )
@@ -648,6 +768,20 @@ def torch_silu_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return (torch.nn.functional.silu(gate.float()) * up.float()).to(torch.float16)
 
 
+def torch_dispatch(hidden_states: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
+    e, m = token_ids.shape
+    h = hidden_states.shape[1]
+    return hidden_states.index_select(0, token_ids.reshape(-1)).reshape(e, m, h).contiguous()
+
+
+def torch_scatter(down: torch.Tensor, token_ids: torch.Tensor, route_weights: torch.Tensor, total_tokens: int) -> torch.Tensor:
+    final = torch.zeros((total_tokens, down.shape[-1]), device=down.device, dtype=torch.float32)
+    flat_idx = token_ids.reshape(-1)
+    flat_vals = down.reshape(-1, down.shape[-1]).float() * route_weights.reshape(-1, 1)
+    final.index_add_(0, flat_idx, flat_vals)
+    return final
+
+
 def error_stats(actual: torch.Tensor, expected: torch.Tensor) -> Tuple[float, float]:
     diff = (actual.float() - expected.float()).abs()
     rel = diff / expected.float().abs().clamp_min(1.0e-6)
@@ -674,7 +808,10 @@ def build_case_tensors(preset: MoEPreset, active_experts: int, tokens_per_expert
     down_channels, down_scales, down_per_tensor = channels_and_scales(args.main_weight_group_size, h)
     ose_channels, ose_scales, ose_per_tensor = channels_and_scales(args.ose_weight_group_size, i)
 
+    total_tokens = infer_total_tokens(e, m, preset.top_k, args.total_tokens)
     x = make_fp16((e, m, h))
+    hidden_states = make_fp16((total_tokens, h))
+    token_ids, route_weights = make_token_metadata(e, m, total_tokens)
     w_gate_full = make_int8((e, i, h))
     w_up_full = make_int8((e, i, h))
     w_down = make_int8((e, h, i))
@@ -686,6 +823,10 @@ def build_case_tensors(preset: MoEPreset, active_experts: int, tokens_per_expert
 
     return {
         "x": x,
+        "hidden_states": hidden_states,
+        "token_ids": token_ids,
+        "route_weights": route_weights,
+        "total_tokens": total_tokens,
         "w_gate_full": w_gate_full,
         "w_up_full": w_up_full,
         "w_gate_main": w_gate_main,
@@ -716,12 +857,13 @@ def build_case_tensors(preset: MoEPreset, active_experts: int, tokens_per_expert
     }
 
 
-def make_runtime_buffers(active_experts: int, tokens_per_expert: int, preset: MoEPreset, args) -> dict:
+def make_runtime_buffers(active_experts: int, tokens_per_expert: int, preset: MoEPreset, total_tokens: int, args) -> dict:
     e = active_experts
     m = tokens_per_expert
     h = preset.hidden
     i = preset.intermediate
     return {
+        "x_expert": torch.empty((e, m, h), device="cuda", dtype=torch.float16),
         "x_tmp_a": torch.empty((e, m, h), device="cuda", dtype=torch.float16),
         "x_tmp_b": torch.empty((e, m, h), device="cuda", dtype=torch.float16),
         "x_tmp_c": torch.empty((e, m, h), device="cuda", dtype=torch.float16),
@@ -736,6 +878,7 @@ def make_runtime_buffers(active_experts: int, tokens_per_expert: int, preset: Mo
         "up": torch.empty((e, m, i), device="cuda", dtype=torch.float16),
         "inter": torch.empty((e, m, i), device="cuda", dtype=torch.float16),
         "down": torch.empty((e, m, h), device="cuda", dtype=torch.float16),
+        "final": torch.empty((total_tokens, h), device="cuda", dtype=torch.float32),
     }
 
 
@@ -878,15 +1021,44 @@ def build_variant_fn(
     h = preset.hidden
     i = preset.intermediate
     topk = min(args.ose_topk, h)
+    routed_layer = args.scope == "routed_moe_layer"
+
+    def get_input() -> torch.Tensor:
+        if not routed_layer:
+            return tensors["x"]
+        launch_dispatch(
+            tensors["hidden_states"],
+            tensors["token_ids"],
+            buffers["x_expert"],
+            e,
+            m,
+            h,
+            tensors["total_tokens"],
+            args,
+        )
+        return buffers["x_expert"]
 
     def finish():
         launch_silu_mul(buffers["gate"], buffers["up"], buffers["inter"], e * m * i, args)
         quantized_down(tensors, buffers, preset, e, m, args)
+        if routed_layer:
+            launch_scatter(
+                buffers["down"],
+                tensors["token_ids"],
+                tensors["route_weights"],
+                buffers["final"],
+                e,
+                m,
+                h,
+                tensors["total_tokens"],
+                args,
+            )
 
     if variant == "duquant_once":
         def fn():
+            x = get_input()
             x_du = launch_duquant_transform(
-                tensors["x"],
+                x,
                 buffers["x_tmp_a"],
                 buffers["x_tmp_b"],
                 tensors["rot_hidden"],
@@ -902,8 +1074,9 @@ def build_variant_fn(
 
     if variant == "duquant_twice":
         def fn():
+            x = get_input()
             x_gate = launch_duquant_transform(
-                tensors["x"],
+                x,
                 buffers["x_tmp_a"],
                 buffers["x_tmp_b"],
                 tensors["rot_hidden"],
@@ -915,7 +1088,7 @@ def build_variant_fn(
             )
             quantized_one_proj(x_gate, tensors, buffers, preset, e, m, "w_gate_full", "gate_scale", "gate", args)
             x_up = launch_duquant_transform(
-                tensors["x"],
+                x,
                 buffers["x_tmp_c"],
                 buffers["x_tmp_d"],
                 tensors["rot_hidden"],
@@ -931,15 +1104,17 @@ def build_variant_fn(
 
     if variant == "plain_no_ose":
         def fn():
-            quantized_gate_up(tensors["x"], tensors, buffers, preset, e, m, "w_gate_full", "w_up_full", args)
+            x = get_input()
+            quantized_gate_up(x, tensors, buffers, preset, e, m, "w_gate_full", "w_up_full", args)
             finish()
         return fn, "dyn_quant+2x_i8_gemm+silu+common_down"
 
     if variant == "ours_ose_w8a8":
         def fn():
-            quantized_gate_up(tensors["x"], tensors, buffers, preset, e, m, "w_gate_main", "w_up_main", args)
+            x = get_input()
+            quantized_gate_up(x, tensors, buffers, preset, e, m, "w_gate_main", "w_up_main", args)
             launch_ose_branch(
-                tensors["x"],
+                x,
                 tensors["gate_idx"],
                 tensors["up_idx"],
                 tensors["w_gate_ose"],
@@ -964,8 +1139,9 @@ def build_variant_fn(
 
     if variant == "component_gateup_duquant_transform":
         def fn():
+            x = get_input()
             launch_duquant_transform(
-                tensors["x"],
+                x,
                 buffers["x_tmp_a"],
                 buffers["x_tmp_b"],
                 tensors["rot_hidden"],
@@ -979,8 +1155,9 @@ def build_variant_fn(
 
     if variant == "component_ose_w8a8_branch":
         def fn():
+            x = get_input()
             launch_ose_branch(
-                tensors["x"],
+                x,
                 tensors["gate_idx"],
                 tensors["up_idx"],
                 tensors["w_gate_ose"],
@@ -1009,7 +1186,10 @@ def reference_for_variant(variant: str, tensors: dict, preset: MoEPreset, active
     if variant.startswith("component_"):
         return None
 
-    x = tensors["x"]
+    if args.scope == "routed_moe_layer":
+        x = torch_dispatch(tensors["hidden_states"], tensors["token_ids"])
+    else:
+        x = tensors["x"]
     if variant in {"duquant_once", "duquant_twice"}:
         x_main = torch_duquant_transform(x, tensors["rot_hidden"], tensors["perm_hidden"], args)
         x_q, x_scale = torch_dynamic_quant_sym(x_main)
@@ -1043,7 +1223,7 @@ def reference_for_variant(variant: str, tensors: dict, preset: MoEPreset, active
     if args.include_down_duquant_transform:
         inter = torch_duquant_transform(inter, tensors["rot_inter"], tensors["perm_inter"], args)
     inter_q, inter_scale = torch_dynamic_quant_sym(inter)
-    return torch_int8_gemm(
+    down = torch_int8_gemm(
         inter_q,
         tensors["w_down"],
         inter_scale,
@@ -1051,18 +1231,23 @@ def reference_for_variant(variant: str, tensors: dict, preset: MoEPreset, active
         tensors["down_channels"],
         tensors["down_per_tensor"],
     )
+    if args.scope == "routed_moe_layer":
+        return torch_scatter(down, tensors["token_ids"], tensors["route_weights"], tensors["total_tokens"])
+    return down
 
 
-def actual_for_variant(variant: str, buffers: dict) -> Optional[torch.Tensor]:
+def actual_for_variant(variant: str, buffers: dict, args) -> Optional[torch.Tensor]:
     if variant.startswith("component_"):
         return None
+    if args.scope == "routed_moe_layer":
+        return buffers["final"]
     return buffers["down"]
 
 
 def run_case(preset_name: str, active_experts: int, tokens_per_expert: int, variant: str, args) -> dict:
     preset = PRESETS[preset_name]
     tensors = build_case_tensors(preset, active_experts, tokens_per_expert, args)
-    buffers = make_runtime_buffers(active_experts, tokens_per_expert, preset, args)
+    buffers = make_runtime_buffers(active_experts, tokens_per_expert, preset, tensors["total_tokens"], args)
     fn, kernel_sequence = build_variant_fn(variant, tensors, buffers, preset, active_experts, tokens_per_expert, args)
 
     fn()
@@ -1072,16 +1257,18 @@ def run_case(preset_name: str, active_experts: int, tokens_per_expert: int, vari
     max_rel = 0.0
     if args.validate and not variant.startswith("component_"):
         expected = reference_for_variant(variant, tensors, preset, active_experts, tokens_per_expert, args)
-        actual = actual_for_variant(variant, buffers)
+        actual = actual_for_variant(variant, buffers, args)
         max_abs, max_rel = error_stats(actual, expected)
 
     median, q20, q80, stdev = measure_ms(fn, args.warmup, args.repeat, args.rounds)
     return {
+        "scope": args.scope,
         "preset": preset_name,
         "variant": variant,
         "active_experts": active_experts,
         "tokens_per_expert": tokens_per_expert,
         "total_routed_tokens": active_experts * tokens_per_expert,
+        "total_tokens": tensors["total_tokens"] if args.scope == "routed_moe_layer" else "",
         "hidden_size": preset.hidden,
         "intermediate_size": preset.intermediate,
         "num_experts_model": preset.num_experts,
@@ -1113,11 +1300,13 @@ def run_case(preset_name: str, active_experts: int, tokens_per_expert: int, vari
 
 
 FIELDS = [
+    "scope",
     "preset",
     "variant",
     "active_experts",
     "tokens_per_expert",
     "total_routed_tokens",
+    "total_tokens",
     "hidden_size",
     "intermediate_size",
     "num_experts_model",
@@ -1149,12 +1338,12 @@ FIELDS = [
 
 
 def add_derived_metrics(rows: List[dict]) -> None:
-    grouped: Dict[Tuple[str, str, str], Dict[str, float]] = {}
+    grouped: Dict[Tuple[str, str, str, str, str], Dict[str, float]] = {}
     for row in rows:
-        key = (row["preset"], row["active_experts"], row["tokens_per_expert"])
+        key = (row["scope"], row["preset"], row["active_experts"], row["tokens_per_expert"], row["total_tokens"])
         grouped.setdefault(key, {})[row["variant"]] = float(row["latency_ms"])
     for row in rows:
-        key = (row["preset"], row["active_experts"], row["tokens_per_expert"])
+        key = (row["scope"], row["preset"], row["active_experts"], row["tokens_per_expert"], row["total_tokens"])
         latency = float(row["latency_ms"])
         du = grouped.get(key, {}).get("duquant_once")
         plain = grouped.get(key, {}).get("plain_no_ose")
@@ -1168,21 +1357,21 @@ def write_report(output_dir: str, rows: List[dict]) -> None:
     report_path = os.path.join(output_dir, "report.md")
     full_rows = [row for row in rows if not row["variant"].startswith("component_")]
     row_map = {
-        (row["preset"], row["active_experts"], row["tokens_per_expert"], row["variant"]): row
+        (row["scope"], row["preset"], row["active_experts"], row["tokens_per_expert"], row["total_tokens"], row["variant"]): row
         for row in full_rows
     }
-    keys = sorted({(r["preset"], r["active_experts"], r["tokens_per_expert"]) for r in full_rows})
+    keys = sorted({(r["scope"], r["preset"], r["active_experts"], r["tokens_per_expert"], r["total_tokens"]) for r in full_rows})
     with open(report_path, "w") as f:
         f.write("# Post-Quant MoE FFN DuQuant-vs-OSE Benchmark\n\n")
-        f.write("This benchmark measures a synthetic post-quant W8A8 FFN runtime path. ")
+        f.write("This benchmark measures a synthetic post-quant W8A8 MoE runtime path. ")
         f.write("Calibration, DuQuant search, weight-side transforms, OSE channel selection, ")
         f.write("weight quantization, and packing are excluded.\n\n")
         f.write("`duquant_once` applies the gate/up DuQuant activation transform once and reuses it for both gate and up. ")
         f.write("`ours_ose_w8a8` removes that gate/up transform and adds a W8A8 top-k input-channel OSE branch. ")
         f.write("The optional down DuQuant transform is a common cost and is included when `include_down_duquant_transform=1`.\n\n")
         f.write("## Summary\n\n")
-        f.write("| preset | E | tokens/expert | duquant_once ms | plain_no_ose ms | ours_ose_w8a8 ms | ours speedup vs duquant_once |\n")
-        f.write("|---|---:|---:|---:|---:|---:|---:|\n")
+        f.write("| scope | preset | E | tokens/expert | total tokens | duquant_once ms | plain_no_ose ms | ours_ose_w8a8 ms | ours speedup vs duquant_once |\n")
+        f.write("|---|---|---:|---:|---:|---:|---:|---:|---:|\n")
         for key in keys:
             du = row_map.get((*key, "duquant_once"))
             plain = row_map.get((*key, "plain_no_ose"))
@@ -1191,7 +1380,7 @@ def write_report(output_dir: str, rows: List[dict]) -> None:
                 continue
             plain_ms = float(plain["latency_ms"]) if plain else float("nan")
             f.write(
-                f"| {key[0]} | {key[1]} | {key[2]} | "
+                f"| {key[0]} | {key[1]} | {key[2]} | {key[3]} | {key[4]} | "
                 f"{float(du['latency_ms']):.6f} | {plain_ms:.6f} | "
                 f"{float(ours['latency_ms']):.6f} | "
                 f"{float(ours['speedup_over_duquant_once']):.4f} |\n"
@@ -1254,10 +1443,12 @@ def run(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Post-quant W8A8 MoE FFN DuQuant-vs-OSE benchmark.")
     parser.add_argument("--output_dir", required=True)
+    parser.add_argument("--scope", default="expert_ffn", choices=["expert_ffn", "routed_moe_layer"])
     parser.add_argument("--presets", default="olmoe")
     parser.add_argument("--variants", default="duquant_once,plain_no_ose,ours_ose_w8a8,component_gateup_duquant_transform,component_ose_w8a8_branch")
     parser.add_argument("--tokens_per_expert", default="1,2,4,8,16,32")
     parser.add_argument("--active_experts", default="1,8,16,64")
+    parser.add_argument("--total_tokens", type=int, default=0, help="only used by --scope routed_moe_layer; default infers E*T/router_top_k")
     parser.add_argument("--ose_topk", type=int, default=64)
     parser.add_argument("--main_weight_group_size", type=int, default=2048)
     parser.add_argument("--ose_weight_group_size", type=int, default=1)

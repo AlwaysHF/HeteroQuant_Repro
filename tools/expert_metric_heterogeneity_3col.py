@@ -37,10 +37,10 @@ METRICS = {
 PANEL_CAPTION_FONT_SIZE = 17.5  # controls all (a)-(f) subplot captions
 LEFT_COLUMN_ROW_HSPACE = 0.47   # controls vertical spacing among the left heatmap rows
 PANEL_CAPTION_XTICK_GAP_POINTS = 0.1  # vertical gap from x-axis numbers to captions
-SUBPLOT_X_AXIS_TITLE_FONT_SIZE = 16.0  # controls x-axis title fontsize, e.g. Expert rank (%)
-SUBPLOT_Y_AXIS_TITLE_FONT_SIZE = 16.0  # controls y-axis title fontsize, e.g. Layer ID / Score ratio
-SUBPLOT_X_TICK_FONT_SIZE = 14         # controls x-axis numeric tick fontsize
-SUBPLOT_Y_TICK_FONT_SIZE = 14         # controls y-axis numeric tick fontsize
+SUBPLOT_X_AXIS_TITLE_FONT_SIZE = 18.0  # controls x-axis title fontsize, e.g. Expert rank (%)
+SUBPLOT_Y_AXIS_TITLE_FONT_SIZE = 18.0  # controls y-axis title fontsize, e.g. Layer ID / Score ratio
+SUBPLOT_X_TICK_FONT_SIZE = 16         # controls x-axis numeric tick fontsize
+SUBPLOT_Y_TICK_FONT_SIZE = 16         # controls y-axis numeric tick fontsize
 MODEL_NAME_FONT_SIZE = 15.0          # controls OLMoE/Qwen label at upper-left of curve plots
 CURVE_LEGEND_SCALE = 1.2             # scales the whole upper-right curve legend box
 
@@ -225,6 +225,8 @@ def add_heatmap_case(
     )
     if model_label == "OLMoE":
         ytick_idx = np.asarray([layers.index(v) for v in (0, 5, 10, 15) if v in layers], dtype=int)
+    elif model_label == "Qwen":
+        ytick_idx = np.asarray([layers.index(v) for v in (5, 11, 17, 23) if v in layers], dtype=int)
     else:
         ytick_idx = np.unique(np.linspace(0, len(layers) - 1, min(7, len(layers)), dtype=int))
     ax_full.set_yticks(ytick_idx)
@@ -381,7 +383,7 @@ def main():
         right=0.955,
         bottom=0.13,
         top=0.945,
-        wspace=0.22,
+        wspace=0.25,
         hspace=LEFT_COLUMN_ROW_HSPACE,
     )
 
@@ -548,7 +550,7 @@ def main():
 
     # 视觉修正：
     # 负数向左，正数向右
-    CBAR_X_OFFSET = -0.011
+    CBAR_X_OFFSET = -0.014
 
     cbar_x = cbar_center_x - 0.5 * cbar_w + CBAR_X_OFFSET
     cbar_y = all_bottom + 0.5 * (full_h - cbar_h)

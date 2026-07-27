@@ -64,8 +64,8 @@ LAYOUT = {
     "caption_gap": 0.039,
     # Curve axes can be scaled after GridSpec placement to create more room
     # for captions and projection lines.
-    "curve_width_scale": 0.94,
-    "curve_height_scale": 0.88,
+    "curve_width_scale": 0.92,
+    "curve_height_scale": 0.80,
     "curve_x_offset": 0.012,
     "curve_y_offset": 0.000,
 }
@@ -98,15 +98,15 @@ FONT_SIZES = {
     # Global default text size.
     "base": 15,
     # Axis label text, e.g. Count, Layer, Overlap (%).
-    "axis_label": 16,
+    "axis_label": 18,
     # Tick label numbers on x/y axes.
-    "tick_label": 12,
+    "tick_label": 14,
     # Legend text in the first left panel.
     "legend": 15,
     # Mean-overlap annotation in the right curve panels.
     "mean_text": 17,
     # Subfigure captions under each panel: (a), (b), ...
-    "panel_caption": 17,
+    "panel_caption": 19,
 }
 
 LEFT_X_TICK_COUNT = 5

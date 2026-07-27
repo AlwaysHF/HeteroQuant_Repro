@@ -11,8 +11,10 @@ OUT_ROOT="${OUT_ROOT:-$ROOT/experiments/post_quant_moe_ffn_group_sweep_${RUN_ID}
 
 GROUP_SIZES="${GROUP_SIZES:-1,2,4,8,16,32,64,128,256,512,1024,2048}"
 PRESETS="${PRESETS:-olmoe}"
+SCOPE="${SCOPE:-expert_ffn}"
 ACTIVE_EXPERTS="${ACTIVE_EXPERTS:-1,8,16,64}"
 TOKENS_PER_EXPERT="${TOKENS_PER_EXPERT:-1,2,4,8,16,32}"
+TOTAL_TOKENS="${TOTAL_TOKENS:-0}"
 VARIANTS="${VARIANTS:-duquant_once,plain_no_ose,ours_ose_w8a8}"
 OSE_WEIGHT_GROUP_SIZE="${OSE_WEIGHT_GROUP_SIZE:-1}"
 VALIDATE="${VALIDATE:-0}"
@@ -25,8 +27,10 @@ mkdir -p "$OUT_ROOT"
 echo "[group-sweep] output: $OUT_ROOT"
 echo "[group-sweep] group_sizes: $GROUP_SIZES"
 echo "[group-sweep] presets: $PRESETS"
+echo "[group-sweep] scope: $SCOPE"
 echo "[group-sweep] active_experts: $ACTIVE_EXPERTS"
 echo "[group-sweep] tokens_per_expert: $TOKENS_PER_EXPERT"
+echo "[group-sweep] total_tokens: $TOTAL_TOKENS"
 echo "[group-sweep] variants: $VARIANTS"
 
 IFS=',' read -r -a group_array <<< "$GROUP_SIZES"
@@ -37,8 +41,10 @@ for group_size in "${group_array[@]}"; do
   echo "[group-sweep] running MAIN_WEIGHT_GROUP_SIZE=$group_size -> $group_dir"
   OUT_ROOT="$group_dir" \
     PRESETS="$PRESETS" \
+    SCOPE="$SCOPE" \
     ACTIVE_EXPERTS="$ACTIVE_EXPERTS" \
     TOKENS_PER_EXPERT="$TOKENS_PER_EXPERT" \
+    TOTAL_TOKENS="$TOTAL_TOKENS" \
     VARIANTS="$VARIANTS" \
     MAIN_WEIGHT_GROUP_SIZE="$group_size" \
     OSE_WEIGHT_GROUP_SIZE="$OSE_WEIGHT_GROUP_SIZE" \

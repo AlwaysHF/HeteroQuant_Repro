@@ -1,0 +1,4 @@
+main_weight_group_size,variant,num_cases,macs_per_routed_token_main_gemm,macs_per_routed_token_gateup_duquant_transform,macs_per_routed_token_ose_branch,unique_overhead_reduction_duquant_vs_ose,estimated_kernel_launches,main_qparam_groups_per_expert,main_qparam_bytes_all_model_experts,main_qparam_reduction_vs_per_channel,ose_duplicate_weight_overhead_ratio_current_layout
+1,duquant_once,24,6291456,524288,131072,4.000000,12,4096,1048576,1.000000,0.020833
+1,ours_ose_w8a8,24,6291456,524288,131072,4.000000,10,4096,1048576,1.000000,0.020833
+1,plain_no_ose,24,6291456,524288,131072,4.000000,9,4096,1048576,1.000000,0.020833

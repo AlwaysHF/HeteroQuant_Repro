@@ -1,0 +1,4 @@
+active_experts,num_cases,fast_cases,slow_cases,speedup_min,speedup_median,speedup_mean,speedup_max
+8,6,6,0,1.099323,1.106113,1.106683,1.115357
+16,6,5,1,0.876298,1.105112,1.070913,1.124329
+64,6,3,3,0.849425,0.994092,0.972831,1.053604

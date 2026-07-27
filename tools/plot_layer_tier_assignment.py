@@ -7,6 +7,9 @@ from collections import Counter, defaultdict
 import matplotlib
 
 matplotlib.use("Agg")
+matplotlib.rcParams["pdf.fonttype"] = 42
+matplotlib.rcParams["ps.fonttype"] = 42
+matplotlib.rcParams["font.family"] = "DejaVu Sans"
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import ListedColormap, BoundaryNorm
@@ -33,17 +36,17 @@ CONFIG = {
     "tick_every": 4,
     "bar_figsize": (13, 3.2),
     "band_figsize": (13, 2.5),
-    "legend_y": 0.88,
+    "legend_y": 0.91,
     "bar_top": 0.74,
     "bar_bottom": 0.27,
-    "bar_left": 0.08,
-    "bar_right": 0.99,
+    "bar_left": 0.10,
+    "bar_right": 0.97,
     "y_pad": 1,
     "bar_yticks": [8, 4, 0, -6],
-    "label_size": 25,
-    "tick_size": 20,
-    "legend_size": 25,
-    "legend_marker_size": 15,
+    "label_size": 28,
+    "tick_size": 23,
+    "legend_size": 28,
+    "legend_marker_size": 17,
 }
 
 

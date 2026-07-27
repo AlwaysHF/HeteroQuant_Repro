@@ -1,0 +1,41 @@
+{
+  "format": "duquant_qwen2_moe_expert_distribution_planner_v1",
+  "model": "/home/lwk/HeteroQuant_Repro/local_models/Qwen1.5-MoE-A2.7B",
+  "output_dir": "/home/lwk/HeteroQuant_Repro/experiments/route_range_aw11_g1_g2048_olmoe_qwen_ppl_downstream_20260723_103056/qwen2_moe_route_range_aw11_g2048_ppl_downstream/plans",
+  "metrics": [
+    "routed_range"
+  ],
+  "plan_paths": {
+    "routed_range": "/home/lwk/HeteroQuant_Repro/experiments/route_range_aw11_g1_g2048_olmoe_qwen_ppl_downstream_20260723_103056/qwen2_moe_route_range_aw11_g2048_ppl_downstream/plans/moe_quant_plan_routed_range.json"
+  },
+  "scores_csv": "/home/lwk/HeteroQuant_Repro/experiments/route_range_aw11_g1_g2048_olmoe_qwen_ppl_downstream_20260723_103056/qwen2_moe_route_range_aw11_g2048_ppl_downstream/plans/expert_distribution_scores.csv",
+  "scores_json": "/home/lwk/HeteroQuant_Repro/experiments/route_range_aw11_g1_g2048_olmoe_qwen_ppl_downstream_20260723_103056/qwen2_moe_route_range_aw11_g2048_ppl_downstream/plans/expert_distribution_scores.json",
+  "plot_paths": [
+    "/home/lwk/HeteroQuant_Repro/experiments/route_range_aw11_g1_g2048_olmoe_qwen_ppl_downstream_20260723_103056/qwen2_moe_route_range_aw11_g2048_ppl_downstream/plans/expert_score_routed_range.png",
+    "/home/lwk/HeteroQuant_Repro/experiments/route_range_aw11_g1_g2048_olmoe_qwen_ppl_downstream_20260723_103056/qwen2_moe_route_range_aw11_g2048_ppl_downstream/plans/expert_assignment_routed_range.png"
+  ],
+  "low_quant": {
+    "name": "w4g-1-a4g-1",
+    "abits": 4,
+    "wbits": 4,
+    "act_group_size": null,
+    "weight_group_size": null,
+    "sum_bits_cost": 8.0,
+    "cost_units": 8000
+  },
+  "high_quant": {
+    "name": "w8g-1-a8g-1",
+    "abits": 8,
+    "wbits": 8,
+    "act_group_size": null,
+    "weight_group_size": null,
+    "sum_bits_cost": 16.0,
+    "cost_units": 16000
+  },
+  "target_avg_sum_bits": 11.0,
+  "selection_scope": "per_layer",
+  "moe_outlier_topk": 64,
+  "moe_outlier_score": "smooth_scale",
+  "weight_stats_mode": "post_outlier_residual",
+  "elapsed_seconds": 255.48022770509124
+}

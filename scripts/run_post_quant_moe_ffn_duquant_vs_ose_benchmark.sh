@@ -10,9 +10,11 @@ RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
 OUT_ROOT="${OUT_ROOT:-$ROOT/experiments/post_quant_moe_ffn_duquant_vs_ose_${RUN_ID}}"
 
 PRESETS="${PRESETS:-olmoe}"
+SCOPE="${SCOPE:-expert_ffn}"
 VARIANTS="${VARIANTS:-duquant_once,plain_no_ose,ours_ose_w8a8,component_gateup_duquant_transform,component_ose_w8a8_branch}"
 ACTIVE_EXPERTS="${ACTIVE_EXPERTS:-1,8,16,64}"
 TOKENS_PER_EXPERT="${TOKENS_PER_EXPERT:-1,2,4,8,16,32}"
+TOTAL_TOKENS="${TOTAL_TOKENS:-0}"
 OSE_TOPK="${OSE_TOPK:-64}"
 
 MAIN_WEIGHT_GROUP_SIZE="${MAIN_WEIGHT_GROUP_SIZE:-2048}"
@@ -52,18 +54,22 @@ fi
 
 echo "[run-post-quant-ffn] output: $OUT_ROOT"
 echo "[run-post-quant-ffn] presets: $PRESETS"
+echo "[run-post-quant-ffn] scope: $SCOPE"
 echo "[run-post-quant-ffn] variants: $VARIANTS"
 echo "[run-post-quant-ffn] active_experts: $ACTIVE_EXPERTS"
 echo "[run-post-quant-ffn] tokens_per_expert: $TOKENS_PER_EXPERT"
+echo "[run-post-quant-ffn] total_tokens: $TOTAL_TOKENS"
 echo "[run-post-quant-ffn] main_weight_group_size=$MAIN_WEIGHT_GROUP_SIZE ose_weight_group_size=$OSE_WEIGHT_GROUP_SIZE ose_topk=$OSE_TOPK"
 echo "[run-post-quant-ffn] warmup=$WARMUP repeat=$REPEAT rounds=$ROUNDS validate=$VALIDATE"
 
 python3 tools/triton_post_quant_moe_ffn_duquant_vs_ose_benchmark.py \
   --output_dir "$OUT_ROOT" \
+  --scope "$SCOPE" \
   --presets "$PRESETS" \
   --variants "$VARIANTS" \
   --active_experts "$ACTIVE_EXPERTS" \
   --tokens_per_expert "$TOKENS_PER_EXPERT" \
+  --total_tokens "$TOTAL_TOKENS" \
   --ose_topk "$OSE_TOPK" \
   --main_weight_group_size "$MAIN_WEIGHT_GROUP_SIZE" \
   --ose_weight_group_size "$OSE_WEIGHT_GROUP_SIZE" \
